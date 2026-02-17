@@ -124,3 +124,6 @@ Practice
 .venv
 uv.lock
 .python-version
+.claude/
+checkpoints/
+checkpoints_dds/
