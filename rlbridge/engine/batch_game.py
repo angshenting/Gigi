@@ -1,5 +1,7 @@
 """Batched game runner — runs N bridge games with batched NN inference."""
 
+import time
+
 import torch
 import logging
 
@@ -47,8 +49,18 @@ class BatchGameRunner:
         trajectories = [[] for _ in range(N)]
         active = [True] * N
 
+        # Timing accumulators
+        t_obs = 0.0
+        t_encode = 0.0
+        t_collate = 0.0
+        t_infer = 0.0
+        t_apply = 0.0
+        n_steps = 0
+        total_batch = 0
+
         while any(active):
             # Collect observations from all active, non-terminal games
+            t0 = time.time()
             batch_indices = []
             observations = []
             legal_actions_list = []
@@ -88,22 +100,35 @@ class BatchGameRunner:
                 players.append(player)
                 acting_agents.append(acting_agent_idx)
 
+            t_obs += time.time() - t0
+
             if not batch_indices:
                 break
 
+            n_steps += 1
+            total_batch += len(batch_indices)
+
             # Batch inference
+            t0 = time.time()
             encoded = [encode_observation(obs, self.model_config)
                        for obs in observations]
+            t_encode += time.time() - t0
+
+            t0 = time.time()
             batch = collate_observations(encoded, self.model_config)
             batch = {k: v.to(self.device) for k, v in batch.items()}
+            t_collate += time.time() - t0
 
+            t0 = time.time()
             result = self.model.get_action_and_value(batch, self.temperature)
+            t_infer += time.time() - t0
 
             actions = result['action'].cpu()
             log_probs = result['log_prob'].cpu()
             values = result['value'].cpu()
 
             # Apply actions to each game
+            t0 = time.time()
             for j, game_idx in enumerate(batch_indices):
                 action = actions[j].item()
                 legal = legal_actions_list[j]
@@ -131,6 +156,14 @@ class BatchGameRunner:
 
                 if states[game_idx].is_terminal:
                     active[game_idx] = False
+            t_apply += time.time() - t0
+
+        avg_batch = total_batch / n_steps if n_steps > 0 else 0.0
+        logger.info(
+            f"BatchGame: {N} games, {n_steps} steps, avg_batch={avg_batch:.1f} | "
+            f"obs={t_obs:.1f}s encode={t_encode:.1f}s collate={t_collate:.1f}s "
+            f"infer={t_infer:.1f}s apply={t_apply:.1f}s"
+        )
 
         # Build GameResults
         results = []

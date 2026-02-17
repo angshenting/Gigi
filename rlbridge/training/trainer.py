@@ -49,16 +49,24 @@ class SelfPlayTrainer:
             t0 = time.time()
 
             # 1. Self-play
+            t1 = time.time()
             results = self._self_play()
+            t_play = time.time() - t1
 
             # 2. Compute PAR for each deal
+            t1 = time.time()
             self._compute_pars(results)
+            t_par = time.time() - t1
 
             # 3. Process trajectories
+            t1 = time.time()
             trajectories = self._process_trajectories(results)
+            t_traj = time.time() - t1
 
             # 4. PPO update
+            t1 = time.time()
             metrics = self.ppo.update(trajectories)
+            t_ppo = time.time() - t1
 
             elapsed = time.time() - t0
 
@@ -86,6 +94,10 @@ class SelfPlayTrainer:
                 f"vloss={metrics.get('value_loss', 0):.4f} | "
                 f"ent={metrics.get('entropy', 0):.4f} | "
                 f"temp={temperature:.3f} | "
+                f"t_play={t_play:.1f}s | "
+                f"t_par={t_par:.1f}s | "
+                f"t_traj={t_traj:.1f}s | "
+                f"t_ppo={t_ppo:.1f}s | "
                 f"time={elapsed:.1f}s"
             )
 
