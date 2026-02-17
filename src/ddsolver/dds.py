@@ -283,23 +283,23 @@ CalcDDtablePBN.argtypes = [ddTableDealPBN, POINTER(ddTableResults)]
 CalcDDtablePBN.restype = c_int
 
 CalcAllTables = dds.CalcAllTables
-"""pointer to struct dd TableDeals * dealsp
+"""pointer to struct ddTableDeals * dealsp
 int mode
 int trumpFilter[DDS_STRAINS]
-poiter to struct ddTablesRes * resp
-pointer to struct allParResults'* presp"""
-CalcAllTables.argtypes = [POINTER(ddTableDeals), c_int * DDS_STRAINS, \
-    c_int, POINTER(ddTablesRes), POINTER(allParResults)]
+pointer to struct ddTablesRes * resp
+pointer to struct allParResults * presp"""
+CalcAllTables.argtypes = [POINTER(ddTableDeals), c_int, \
+    c_int * DDS_STRAINS, POINTER(ddTablesRes), POINTER(allParResults)]
 CalcAllTables.restype = c_int
 
 CalcAllTablesPBN = dds.CalcAllTablesPBN
 """pointer to struct ddTableDealsPBN * dealsp
 int mode
-int trumpFilter[DDS_STRINS]
-pointer to struct ddTablesRes *resp
+int trumpFilter[DDS_STRAINS]
+pointer to struct ddTablesRes * resp
 pointer to struct allParResults * presp"""
-CalcAllTablesPBN.argtypes = [POINTER(ddTableDealsPBN), c_int * DDS_STRAINS, \
-    c_int, POINTER(ddTablesRes), POINTER(allParResults)]
+CalcAllTablesPBN.argtypes = [POINTER(ddTableDealsPBN), c_int, \
+    c_int * DDS_STRAINS, POINTER(ddTablesRes), POINTER(allParResults)]
 CalcAllTablesPBN.restype = c_int
 
 SolveAllBoards = dds.SolveAllBoards

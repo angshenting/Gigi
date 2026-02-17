@@ -3,8 +3,6 @@
 import sys
 import os
 import logging
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
@@ -45,32 +43,14 @@ def compute_par(deal: Deal) -> int:
         return 0
 
 
-def _compute_par_worker(args):
-    """Worker function for multiprocessing PAR computation.
+def compute_pars_batch(deals: list) -> list:
+    """Compute PAR scores for multiple deals using DDS batch API.
 
-    Each worker process creates its own DDSolver (DDS is not thread-safe
-    but separate processes are fine).
-    """
-    pbn_str, vuln_ns, vuln_ew = args
-    try:
-        from ddsolver.ddsolver import DDSolver
-        solver = DDSolver(dds_mode=1, verbose=False)
-        # Strip the "N:" prefix
-        hand = pbn_str[2:]
-        vuln = [vuln_ns, vuln_ew]
-        par = solver.calculatepar(hand, vuln, print_result=False)
-        return par if par is not None else 0
-    except Exception:
-        return 0
-
-
-def compute_pars_batch(deals: list, max_workers: int = 1) -> list:
-    """Compute PAR scores for multiple deals.
+    Uses CalcAllTablesPBN which computes DD tables for up to 50 deals
+    in a single call with internal multi-threading.
 
     Args:
         deals: list of Deal objects
-        max_workers: 1 for sequential (reuses singleton solver),
-                     >1 for parallel with ProcessPoolExecutor
 
     Returns:
         list of int PAR scores (NS perspective)
@@ -78,17 +58,15 @@ def compute_pars_batch(deals: list, max_workers: int = 1) -> list:
     if not deals:
         return []
 
-    if max_workers <= 1:
-        # Sequential — reuse module-level solver
-        return [compute_par(deal) for deal in deals]
+    solver = _get_solver()
+    hands = []
+    vulns = []
+    for deal in deals:
+        pbn = deal.hand_pbn()
+        hands.append(pbn[2:])  # Strip "N:" prefix
+        vulns.append([deal.vuln_ns, deal.vuln_ew])
 
-    # Parallel — serialize to picklable tuples, use spawn to avoid
-    # ctypes/DDS fork issues
-    args = [(deal.hand_pbn(), deal.vuln_ns, deal.vuln_ew) for deal in deals]
-    ctx = multiprocessing.get_context('spawn')
-    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
-        results = list(executor.map(_compute_par_worker, args))
-    return results
+    return solver.calculate_par_batch(hands, vulns)
 
 
 def compute_reward(score_ns: int, par_ns: int) -> tuple:

@@ -15,7 +15,7 @@ from rlbridge.engine.experience import GameResult
 from rlbridge.model.config import ModelConfig
 from rlbridge.model.network import BridgeModel
 from rlbridge.model.nn_agent import NNAgent
-from rlbridge.training.config import TrainingConfig
+from rlbridge.training.config import TrainingConfig, compute_temperature
 from rlbridge.training.reward import compute_par, compute_pars_batch, assign_rewards
 from rlbridge.training.ppo import PPOTrainer
 
@@ -73,6 +73,7 @@ class SelfPlayTrainer:
                 avg_imp = np.mean(imps) if imps else 0.0
 
             n_passed = sum(1 for r in results if r.contract is None)
+            temperature = compute_temperature(self.training_config, iteration)
 
             logger.info(
                 f"Iter {iteration:5d} | "
@@ -84,6 +85,7 @@ class SelfPlayTrainer:
                 f"ploss={metrics.get('policy_loss', 0):.4f} | "
                 f"vloss={metrics.get('value_loss', 0):.4f} | "
                 f"ent={metrics.get('entropy', 0):.4f} | "
+                f"temp={temperature:.3f} | "
                 f"time={elapsed:.1f}s"
             )
 
@@ -98,19 +100,22 @@ class SelfPlayTrainer:
     def _self_play(self) -> list:
         """Run self-play games with batched inference."""
         self.model.eval()
+        temperature = compute_temperature(self.training_config, self.iteration)
         deals = [Deal.random() for _ in range(self.training_config.games_per_iteration)]
         runner = BatchGameRunner(self.model, self.model_config,
-                                 self.training_config.temperature, self.device)
+                                 temperature, self.device)
         results = runner.play_games(deals)
         self.model.train()
         return results
 
     def _compute_pars(self, results: list):
         """Compute PAR scores for all deals using batch DDS."""
+        t0 = time.time()
         deals = [r.deal for r in results]
-        pars = compute_pars_batch(deals, max_workers=4)
+        pars = compute_pars_batch(deals)
         for result, par in zip(results, pars):
             result.par_ns = par
+        logger.debug(f"PAR computation: {len(deals)} deals in {time.time() - t0:.2f}s")
 
     def _process_trajectories(self, results: list) -> list:
         """Convert game results into PPO training data."""

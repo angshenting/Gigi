@@ -32,6 +32,10 @@ def parse_args():
     parser.add_argument('--ppo-epochs', type=int, default=4)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--temperature', type=float, default=1.0)
+    parser.add_argument('--temperature-start', type=float, default=1.0)
+    parser.add_argument('--temperature-end', type=float, default=0.3)
+    parser.add_argument('--temperature-schedule', type=str, default='constant',
+                        choices=['constant', 'linear', 'cosine', 'exponential'])
     parser.add_argument('--entropy-coef', type=float, default=0.01)
 
     # Evaluation & checkpointing
@@ -76,6 +80,9 @@ def main():
         ppo_epochs=args.ppo_epochs,
         batch_size=args.batch_size,
         temperature=args.temperature,
+        temperature_start=args.temperature_start,
+        temperature_end=args.temperature_end,
+        temperature_schedule=args.temperature_schedule,
         entropy_coef=args.entropy_coef,
         eval_interval=args.eval_interval,
         eval_games=args.eval_games,

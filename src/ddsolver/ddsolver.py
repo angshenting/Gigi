@@ -31,6 +31,94 @@ class DDSolver:
     def version(self):  
         return "2.9.0"
     
+    def calculate_par_batch(self, hands, vulns):
+        """Compute PAR scores for multiple deals using CalcAllTablesPBN.
+
+        Args:
+            hands: list of PBN hand strings (without 'N:' prefix)
+            vulns: list of [vuln_ns, vuln_ew] pairs
+
+        Returns:
+            list of int PAR scores (NS perspective), 0 on failure
+        """
+        if not hands:
+            return []
+
+        results = []
+        # DDS limit: noOfTables * DDS_STRAINS <= MAXNOOFBOARDS
+        max_batch = dds.MAXNOOFBOARDS // dds.DDS_STRAINS  # 200/5 = 40
+
+        for start in range(0, len(hands), max_batch):
+            chunk_hands = hands[start:start + max_batch]
+            chunk_vulns = vulns[start:start + max_batch]
+            chunk_results = self._calc_batch_chunk(chunk_hands, chunk_vulns)
+            results.extend(chunk_results)
+
+        return results
+
+    def _calc_batch_chunk(self, hands, vulns):
+        """Process a single batch chunk (up to 50 deals) through CalcAllTablesPBN."""
+        n = len(hands)
+        deals_pbn = dds.ddTableDealsPBN()
+        deals_pbn.noOfTables = n
+
+        for i in range(n):
+            deals_pbn.deals[i].cards = ("N:" + hands[i]).encode('utf-8')
+
+        table_res = dds.ddTablesRes()
+        par_res = dds.allParResults()
+
+        # trumpFilter: all zeros = compute all 5 strains
+        trump_filter = (ctypes.c_int * dds.DDS_STRAINS)(0, 0, 0, 0, 0)
+
+        res = dds.CalcAllTablesPBN(
+            ctypes.pointer(deals_pbn),
+            -1,  # mode: -1 = no par calculation by CalcAllTablesPBN
+            trump_filter,
+            ctypes.pointer(table_res),
+            ctypes.pointer(par_res),
+        )
+
+        if res != 1:
+            # Fallback: compute individually
+            error_message = dds.get_error_message(res)
+            sys.stderr.write(f"CalcAllTablesPBN error {res}: {error_message}, falling back to individual\n")
+            return [self._single_par(hands[i], vulns[i]) for i in range(n)]
+
+        # Call Par individually on each DD table result
+        scores = []
+        for i in range(n):
+            try:
+                table_ptr = ctypes.pointer(table_res.results[i])
+                pres = dds.parResults()
+
+                v = 0
+                if vulns[i][0]: v = 2
+                if vulns[i][1]: v = 3
+                if vulns[i][0] and vulns[i][1]: v = 1
+
+                par_ret = dds.Par(table_ptr, pres, v)
+                if par_ret != 1:
+                    scores.append(0)
+                    continue
+
+                par_ptr = ctypes.pointer(pres)
+                par_str = par_ptr.contents.parScore[0].value.decode('utf-8')
+                ns_score = int(par_str.split()[1])
+                scores.append(ns_score)
+            except Exception:
+                scores.append(0)
+
+        return scores
+
+    def _single_par(self, hand, vuln):
+        """Fallback: compute PAR for a single deal."""
+        try:
+            par = self.calculatepar(hand, vuln, print_result=False)
+            return par if par is not None else 0
+        except Exception:
+            return 0
+
     def calculatepar(self, hand, vuln, print_result=True):
         tableDealPBN = dds.ddTableDealPBN()
         table = dds.ddTableResults()
