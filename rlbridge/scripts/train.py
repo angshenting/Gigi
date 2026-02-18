@@ -29,8 +29,10 @@ def parse_args():
     parser.add_argument('--num-iterations', type=int, default=10000)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--clip-epsilon', type=float, default=0.2)
-    parser.add_argument('--ppo-epochs', type=int, default=4)
+    parser.add_argument('--ppo-epochs', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--target-kl', type=float, default=0.02,
+                        help='KL divergence threshold for early stopping (None to disable)')
     parser.add_argument('--temperature', type=float, default=1.0)
     parser.add_argument('--temperature-start', type=float, default=1.0)
     parser.add_argument('--temperature-end', type=float, default=0.3)
@@ -84,6 +86,7 @@ def main():
         temperature_end=args.temperature_end,
         temperature_schedule=args.temperature_schedule,
         entropy_coef=args.entropy_coef,
+        target_kl=args.target_kl,
         eval_interval=args.eval_interval,
         eval_games=args.eval_games,
         checkpoint_interval=args.checkpoint_interval,

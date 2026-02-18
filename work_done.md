@@ -80,13 +80,13 @@ Self-play reinforcement learning with IMP vs PAR rewards.
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `config.py` | 41 | `TrainingConfig` — PPO hyperparameters, self-play settings |
+| `config.py` | 42 | `TrainingConfig` — PPO hyperparameters, self-play settings |
 | `reward.py` | 76 | DDS PAR computation via `DDSolver`, IMP-based reward assignment (zero-sum: NS gets +IMPs, EW gets -IMPs) |
-| `ppo.py` | 166 | `PPOTrainer` — clipped PPO with advantage normalization, separate bid/card evaluation, Adam + cosine LR schedule |
+| `ppo.py` | 213 | `PPOTrainer` — clipped PPO with advantage normalization, separate bid/card evaluation, Adam + cosine LR schedule, sub-phase profiling, KL early stopping |
 | `trainer.py` | 218 | `SelfPlayTrainer` — main loop: self-play → PAR → rewards → PPO update, with periodic evaluation (NN vs Random) and checkpointing |
 | `supervised.py` | 86 | `SupervisedTrainer` — optional pre-training from BEN bidding data with cross-entropy loss |
 
-**PPO defaults:** clip_epsilon=0.2, value_coef=0.5, entropy_coef=0.01, 4 PPO epochs, batch_size=256, lr=3e-4.
+**PPO defaults:** clip_epsilon=0.2, value_coef=0.5, entropy_coef=0.01, 2 PPO epochs, batch_size=256, lr=3e-4, target_kl=0.02.
 
 **Reward:** Terminal IMP difference from double-dummy PAR. gamma=1.0 (no discounting). Each step in the trajectory receives the player's terminal reward as its return.
 
@@ -290,12 +290,39 @@ TOTAL                 400.6s          312.5s               16.3s
 
 **Overall speedup: 24.6x** (400.6s → 16.3s per iteration).
 
+### PPO Update Optimization
+
+Profiling showed PPO update dominated CPU iteration time (49-67s out of 63-87s). Three changes were applied:
+
+| Change | File | Impact |
+|--------|------|--------|
+| Sub-phase profiling | `ppo.py` | Times prep/forward/backward separately; logs summary per update |
+| Reduce `ppo_epochs` 4→2 | `config.py`, `train.py` | Halves forward+backward passes (8→4 mini-batches). 4 epochs was aggressive for ~500 steps on a 5M-param model |
+| KL early stopping (`target_kl=0.02`) | `ppo.py`, `config.py`, `train.py` | Breaks epoch loop early if `approx_kl > target_kl`, preventing wasted compute and policy collapse |
+
+**Profiling output format:**
+```
+PPO: 500 steps, 2/2 epochs, 4 batches | prep=0.3s fwd=11.0s bwd=17.6s total=28.9s
+PPO early stopping at epoch 1/2, batch 2: approx_kl=0.0312 > target_kl=0.0200
+```
+
+Metrics are now averaged over actual steps processed (not theoretical `n × ppo_epochs`), so early stopping produces correct metric values. The `epochs_completed` count is returned in the metrics dict.
+
+**Verification run (2 iterations, 8 games/iter, CPU):**
+```
+Iter 0 | t_ppo=24.5s (early stopped at epoch 2, approx_kl=0.0274) | vloss=324.1 | ent=1.04
+Iter 1 | t_ppo=23.0s (full 2 epochs)                               | vloss=313.6 | ent=1.05
+```
+
+PPO time dropped from 49-67s → 23-25s. KL early stopping triggered on iter 0. Value loss decreasing and entropy stable — training behaves correctly.
+
 ### Verification
 
 - 200 games through `BatchGameRunner`: 0 errors, all tricks sum to 13, all trajectory actions legal
 - `compute_pars_batch(max_workers=1)` matches sequential `compute_par()` on all test deals
 - `compute_pars_batch(max_workers=4)` (spawn context) matches sequential results
 - Full training iteration completes successfully on GPU with correct metrics
+- All 52 tests pass after PPO optimization changes
 
 ---
 

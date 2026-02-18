@@ -21,8 +21,9 @@ class TrainingConfig:
     value_coef: float = 0.5
     entropy_coef: float = 0.01
     max_grad_norm: float = 0.5
-    ppo_epochs: int = 4
+    ppo_epochs: int = 2
     batch_size: int = 256
+    target_kl: float = 0.02
 
     # Learning rate
     lr: float = 3e-4

@@ -1,5 +1,8 @@
 """PPO implementation for bridge self-play training."""
 
+import logging
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +12,8 @@ from rlbridge.model.config import ModelConfig
 from rlbridge.model.network import BridgeModel
 from rlbridge.model.encoder import encode_observation, collate_observations
 from rlbridge.training.config import TrainingConfig
+
+logger = logging.getLogger(__name__)
 
 
 class PPOTrainer:
@@ -53,6 +58,8 @@ class PPOTrainer:
         if not trajectories:
             return {}
 
+        t_prep_start = time.monotonic()
+
         # Encode all observations and pre-collate into one padded batch
         encoded = [encode_observation(t['observation'], self.model_config)
                     for t in trajectories]
@@ -74,6 +81,8 @@ class PPOTrainer:
         if len(advantages) > 1:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+        t_prep = time.monotonic() - t_prep_start
+
         n = len(trajectories)
         total_metrics = {
             'policy_loss': 0.0,
@@ -83,6 +92,12 @@ class PPOTrainer:
             'approx_kl': 0.0,
             'clip_fraction': 0.0,
         }
+        total_batches = 0
+        total_steps_counted = 0
+        t_fwd_total = 0.0
+        t_bwd_total = 0.0
+        epochs_completed = 0
+        early_stopped = False
 
         for epoch in range(self.config.ppo_epochs):
             # Shuffle and create mini-batches
@@ -101,7 +116,8 @@ class PPOTrainer:
                 batch_adv = advantages[batch_idx]
                 batch_is_bid = is_bid[batch_idx]
 
-                # Evaluate actions
+                # Forward pass
+                t_fwd_start = time.monotonic()
                 result = self.model.evaluate_actions(
                     batch, batch_actions, batch_is_bid
                 )
@@ -132,13 +148,17 @@ class PPOTrainer:
                 loss = (policy_loss +
                         self.config.value_coef * value_loss +
                         self.config.entropy_coef * entropy_loss)
+                t_fwd_total += time.monotonic() - t_fwd_start
 
+                # Backward + optimizer step
+                t_bwd_start = time.monotonic()
                 self.optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.config.max_grad_norm
                 )
                 self.optimizer.step()
+                t_bwd_total += time.monotonic() - t_bwd_start
 
                 # Metrics
                 with torch.no_grad():
@@ -152,14 +172,42 @@ class PPOTrainer:
                 total_metrics['total_loss'] += loss.item() * bs
                 total_metrics['approx_kl'] += approx_kl * bs
                 total_metrics['clip_fraction'] += clip_frac * bs
+                total_batches += 1
+                total_steps_counted += bs
 
-        # Average metrics
-        total_steps = n * self.config.ppo_epochs
+                # KL early stopping
+                if self.config.target_kl is not None and approx_kl > self.config.target_kl:
+                    logger.info(
+                        "PPO early stopping at epoch %d/%d, batch %d: "
+                        "approx_kl=%.4f > target_kl=%.4f",
+                        epoch + 1, self.config.ppo_epochs,
+                        total_batches, approx_kl, self.config.target_kl,
+                    )
+                    early_stopped = True
+                    break
+
+            epochs_completed = epoch + 1
+            if early_stopped:
+                break
+
+        # Average metrics over actual steps processed
         for key in total_metrics:
-            total_metrics[key] /= max(total_steps, 1)
+            total_metrics[key] /= max(total_steps_counted, 1)
 
         if self.scheduler is not None:
             self.scheduler.step()
 
         total_metrics['lr'] = self.optimizer.param_groups[0]['lr']
+        total_metrics['epochs_completed'] = epochs_completed
+
+        # Log profiling summary
+        t_total = t_prep + t_fwd_total + t_bwd_total
+        logger.info(
+            "PPO: %d steps, %d/%d epochs, %d batches | "
+            "prep=%.1fs fwd=%.1fs bwd=%.1fs total=%.1fs%s",
+            n, epochs_completed, self.config.ppo_epochs, total_batches,
+            t_prep, t_fwd_total, t_bwd_total, t_total,
+            " (early stopped)" if early_stopped else "",
+        )
+
         return total_metrics
