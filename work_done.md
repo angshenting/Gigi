@@ -324,6 +324,74 @@ PPO time dropped from 49-67s → 23-25s. KL early stopping triggered on iter 0. 
 - Full training iteration completes successfully on GPU with correct metrics
 - All 52 tests pass after PPO optimization changes
 
+### Fourth Training Run — 500 iterations, 64 games/iter, RTX 5070 Ti
+
+First extended run with PPO optimizations (2 epochs, KL early stopping). Total: 32,000 games, ~1.85M training steps, 44 minutes wall time.
+
+```
+Window        avg_imp   ploss    vloss   entropy
+Iter   0- 49:  -0.12   -0.0003   133.6   1.053
+Iter  50- 99:  +0.02    0.0027    82.0   0.945
+Iter 100-149:  +0.21    0.0036    69.8   0.883
+Iter 150-199:  -0.04    0.0013    63.5   0.868
+Iter 200-249:  +0.17    0.0047    56.0   0.809
+Iter 250-299:  +0.13    0.0008    47.3   0.794
+Iter 300-349:  +0.25   -0.0004    44.6   0.760
+Iter 350-399:  +0.57    0.0018    42.2   0.728
+Iter 400-449:  +1.78    0.0017    40.0   0.713
+Iter 450-499:  +1.35    0.0015    41.9   0.707
+```
+
+**Evaluation vs Random (20 games, sequential, same deals):**
+```
+Iter  49: advantage=  -175
+Iter  99: advantage= +1695
+Iter 149: advantage=     0
+Iter 199: advantage=  -702
+Iter 249: advantage=  -345
+Iter 299: advantage=  +218
+Iter 349: advantage=   +66
+Iter 399: advantage=  -208
+Iter 449: advantage=  -218
+Iter 499: advantage=   -45
+```
+
+**Key observations:**
+- **Value learning is strong**: vloss dropped 267 → 34, model accurately predicts game outcomes
+- **IMP signal is improving**: avg_imp rose from -0.12 (iter 0-49) to +1.78 (iter 400-449) — the model is starting to beat PAR
+- **Entropy declining naturally**: 1.05 → 0.71 over 500 iters, policy is specializing without collapsing
+- **Eval is too noisy**: 20 sequential games with raw score (not IMPs) produces huge variance. The eval advantage fluctuates wildly (-702 to +1695) while the training IMP signal shows steady improvement
+- **KL early stopping is aggressive**: triggered on 347/500 iterations (69%), with 246 stopping at epoch 1 of 2. The policy updates are very small per iteration — but the cumulative effect over 500 iters is clearly positive
+- **PPO optimization working**: ~5s/iter (down from 13-16s pre-optimization), PPO itself only 1-2s
+
+**Diagnosis — why eval doesn't match training signal:**
+1. Eval uses only 20 games — a single outlier contract swings the average by hundreds of points
+2. Eval reports raw score, not IMPs — a single 7NT hand (2220 pts) dominates the average
+3. Eval uses `Game()` (sequential), not `BatchGameRunner` — different code path
+4. The training IMP signal is the reliable metric: avg_imp=+1.4 over the last 100 iters means the model consistently scores ~1.4 IMPs above PAR per game
+
+Checkpoint saved at `checkpoints_run4/model_iter_000499.pt`.
+
+### Eval Fix — IMP Scoring
+
+The eval metric was broken: it reported raw score averages, where a single 7NT hand (2220 pts) could dominate the result. Combined with only 20 games (run 4 used `--eval-games 20`), this produced wild fluctuations (-702 to +1695) that masked the real training progress.
+
+**Root cause:** `_evaluate()` in `trainer.py` collected raw `score_ns` values and averaged them. Training used IMP-vs-PAR (via `compute_reward()`), which normalizes extreme scores — but eval didn't.
+
+**Fix applied to `trainer.py`:**
+- Generate all eval deals upfront, compute PAR in a single batch via `compute_pars_batch()`
+- Convert each game result to IMPs vs PAR using `compute_reward(score_ns, par_ns)`
+- Track and report IMP-based metrics instead of raw scores
+- Added timing to eval log line
+- Also cleaned up a redundant inline `import compute_reward` in the training log section (already imported at module level)
+
+**New eval log format:**
+```
+EVAL iter 99: nn_imp=+2.3 rand_imp=-1.8 advantage=+4.1 (100 games, 8.2s)
+```
+
+No config changes needed — `--eval-games` default is already 100; run 4 just happened to use `--eval-games 20`. All 52 tests pass.
+
 ---
 
 ## Bug Fixes Applied

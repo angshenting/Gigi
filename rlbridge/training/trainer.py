@@ -16,7 +16,7 @@ from rlbridge.model.config import ModelConfig
 from rlbridge.model.network import BridgeModel
 from rlbridge.model.nn_agent import NNAgent
 from rlbridge.training.config import TrainingConfig, compute_temperature
-from rlbridge.training.reward import compute_par, compute_pars_batch, assign_rewards
+from rlbridge.training.reward import compute_par, compute_pars_batch, compute_reward, assign_rewards
 from rlbridge.training.ppo import PPOTrainer
 
 logger = logging.getLogger(__name__)
@@ -75,7 +75,6 @@ class SelfPlayTrainer:
             avg_par = np.mean([r.par_ns for r in results if r.par_ns is not None] or [0])
             avg_imp = 0.0
             if any(r.par_ns is not None for r in results):
-                from rlbridge.training.reward import compute_reward
                 imps = [compute_reward(r.score_ns, r.par_ns)[0]
                         for r in results if r.par_ns is not None]
                 avg_imp = np.mean(imps) if imps else 0.0
@@ -152,16 +151,21 @@ class SelfPlayTrainer:
         return all_trajectories
 
     def _evaluate(self, iteration: int):
-        """Evaluate current model against random baseline."""
+        """Evaluate current model against random baseline using IMP scoring."""
         self.model.eval()
-        nn_scores = []
-        random_scores = []
+        t0 = time.time()
 
         rng = np.random.RandomState(42)
+        n_games = self.training_config.eval_games
 
-        for _ in range(self.training_config.eval_games):
-            deal = Deal.random(rng)
+        # Generate all deals upfront and compute PAR in batch
+        deals = [Deal.random(rng) for _ in range(n_games)]
+        pars = compute_pars_batch(deals)
 
+        nn_imps = []     # IMP score when NN plays NS
+        rand_imps = []   # IMP score when Random plays NS
+
+        for deal, par_ns in zip(deals, pars):
             # NN plays NS, Random plays EW
             agents = [
                 NNAgent(self.model, self.model_config,
@@ -174,7 +178,8 @@ class SelfPlayTrainer:
             game = Game(agents, deal)
             try:
                 result = game.play()
-                nn_scores.append(result.score_ns)
+                imp, _ = compute_reward(result.score_ns, par_ns)
+                nn_imps.append(imp)
             except Exception:
                 pass
 
@@ -190,17 +195,21 @@ class SelfPlayTrainer:
             game2 = Game(agents2, deal)
             try:
                 result2 = game2.play()
-                random_scores.append(result2.score_ns)
+                # Random is NS here; NN is EW so NN's IMP = -imp_ns
+                imp_ns, _ = compute_reward(result2.score_ns, par_ns)
+                rand_imps.append(imp_ns)
             except Exception:
                 pass
 
-        avg_nn = np.mean(nn_scores) if nn_scores else 0
-        avg_rand = np.mean(random_scores) if random_scores else 0
+        avg_nn = np.mean(nn_imps) if nn_imps else 0.0
+        avg_rand = np.mean(rand_imps) if rand_imps else 0.0
+        elapsed = time.time() - t0
 
         logger.info(
             f"EVAL iter {iteration}: "
-            f"NN_as_NS={avg_nn:.0f} | Random_as_NS={avg_rand:.0f} | "
-            f"advantage={avg_nn - avg_rand:.0f}"
+            f"nn_imp={avg_nn:+.1f} rand_imp={avg_rand:+.1f} "
+            f"advantage={avg_nn - avg_rand:+.1f} "
+            f"({n_games} games, {elapsed:.1f}s)"
         )
 
         self.model.train()
