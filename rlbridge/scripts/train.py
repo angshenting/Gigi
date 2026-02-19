@@ -100,7 +100,7 @@ def main():
 
     if args.resume:
         import torch
-        checkpoint = torch.load(args.resume, map_location=args.device)
+        checkpoint = torch.load(args.resume, map_location=args.device, weights_only=False)
         trainer.model.load_state_dict(checkpoint['model_state_dict'])
         trainer.ppo.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         trainer.iteration = checkpoint.get('iteration', 0)

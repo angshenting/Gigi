@@ -392,6 +392,57 @@ EVAL iter 99: nn_imp=+2.3 rand_imp=-1.8 advantage=+4.1 (100 games, 8.2s)
 
 No config changes needed — `--eval-games` default is already 100; run 4 just happened to use `--eval-games 20`. All 52 tests pass.
 
+### Fifth Training Run — 500 iterations, 64 games/iter, RTX 5070 Ti (resumed from run 4)
+
+Resumed from `checkpoints_run4/model_iter_000499.pt`. First run with IMP-based eval (100 games). Total: 32,000 games on top of run 4's 32,000 (64,000 cumulative), 65 minutes wall time.
+
+**Training metrics (50-iter windows):**
+
+```
+Window        avg_imp   vloss   entropy
+Iter   0- 49:  +1.2     40.5    0.710
+Iter  50- 99:  +1.0     39.8    0.707
+Iter 100-149:  +1.0     40.2    0.706
+Iter 150-199:  +0.9     39.5    0.704
+Iter 200-249:  +1.0     40.1    0.703
+Iter 250-299:  +1.1     41.3    0.700
+Iter 300-349:  +1.0     39.7    0.700
+Iter 350-399:  +1.0     40.8    0.698
+Iter 400-449:  +1.1     40.0    0.705
+Iter 450-499:  +1.3     36.3    0.704
+```
+
+**Evaluation vs Random (100 games, IMP scoring):**
+
+```
+Iter  49: nn_imp=+0.6, rand_imp=-0.9, advantage=+1.6
+Iter  99: nn_imp=+0.5, rand_imp=-0.8, advantage=+1.3
+Iter 149: nn_imp=+0.3, rand_imp=-0.7, advantage=+1.0
+Iter 199: nn_imp=+0.2, rand_imp=-0.7, advantage=+0.9
+Iter 249: nn_imp=+0.3, rand_imp=-0.4, advantage=+0.7
+Iter 299: nn_imp=+0.7, rand_imp=-0.7, advantage=+1.4
+Iter 349: nn_imp=+0.2, rand_imp=-0.4, advantage=+0.5
+Iter 399: nn_imp=+0.1, rand_imp=-0.7, advantage=+0.7
+Iter 449: nn_imp=-0.0, rand_imp=-0.6, advantage=+0.6
+Iter 499: nn_imp=+0.5, rand_imp=-0.7, advantage=+1.2
+```
+
+**Key observations:**
+- **Eval fix validated**: IMP-based eval is stable — advantage consistently in the +0.5 to +1.6 range, no more wild swings (-702 to +1695) from run 4's raw-score eval
+- **Plateau confirmed**: 500 more iterations produced no improvement. Advantage hovers around +1 IMP/game, vloss flat at ~40, entropy stable at ~0.70
+- **Model beats random but isn't improving**: The NN scores roughly at PAR (nn_imp ≈ 0) while random scores below PAR (rand_imp ≈ -0.7), giving a consistent ~1 IMP advantage
+- **Training signal also flat**: avg_imp stayed around +1.0 throughout, compared to the +1.4 to +1.8 it reached at the end of run 4
+
+**Diagnosis — why the plateau:**
+1. With constant temperature=1.0 and no schedule, exploration doesn't decrease — the model can't sharpen its policy
+2. KL early stopping (target_kl=0.02) is very conservative — 69% of iterations stopped early in run 4, limiting per-step learning
+3. 64 games/iter may be too few for the policy gradient signal to overcome noise at this stage
+4. The model may need architectural changes (larger model, different features) or curriculum (opponent pool, supervised pre-training) to break through
+
+Checkpoint saved at `checkpoints_run5/model_iter_000499.pt`.
+
+**Also fixed:** `torch.load` in `train.py` needed `weights_only=False` for PyTorch 2.6 compatibility when resuming checkpoints containing `ModelConfig`/`TrainingConfig` objects.
+
 ---
 
 ## Bug Fixes Applied
