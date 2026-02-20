@@ -2,6 +2,7 @@
 
 import math
 from dataclasses import dataclass, field
+from typing import Optional
 
 import torch
 
@@ -23,7 +24,7 @@ class TrainingConfig:
     max_grad_norm: float = 0.5
     ppo_epochs: int = 2
     batch_size: int = 256
-    target_kl: float = 0.02
+    target_kl: Optional[float] = 0.02
 
     # Learning rate
     lr: float = 3e-4

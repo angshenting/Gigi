@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument('--ppo-epochs', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=256)
     parser.add_argument('--target-kl', type=float, default=0.02,
-                        help='KL divergence threshold for early stopping (None to disable)')
+                        help='KL divergence threshold for early stopping (0 to disable)')
     parser.add_argument('--temperature', type=float, default=1.0)
     parser.add_argument('--temperature-start', type=float, default=1.0)
     parser.add_argument('--temperature-end', type=float, default=0.3)
@@ -54,6 +54,16 @@ def parse_args():
     # Resume
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
+
+    # Supervised pre-training
+    parser.add_argument('--pretrain-data', type=str, default=None,
+                        help='Path to directory containing PBN files for pre-training')
+    parser.add_argument('--pretrain-epochs', type=int, default=5,
+                        help='Number of supervised pre-training epochs')
+    parser.add_argument('--pretrain-lr', type=float, default=1e-4,
+                        help='Learning rate for pre-training')
+    parser.add_argument('--pretrain-batch-size', type=int, default=64,
+                        help='Batch size for pre-training')
 
     return parser.parse_args()
 
@@ -86,7 +96,7 @@ def main():
         temperature_end=args.temperature_end,
         temperature_schedule=args.temperature_schedule,
         entropy_coef=args.entropy_coef,
-        target_kl=args.target_kl,
+        target_kl=args.target_kl if args.target_kl != 0 else None,
         eval_interval=args.eval_interval,
         eval_games=args.eval_games,
         checkpoint_interval=args.checkpoint_interval,
@@ -105,6 +115,49 @@ def main():
         trainer.ppo.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         trainer.iteration = checkpoint.get('iteration', 0)
         logging.info(f"Resumed from {args.resume} at iteration {trainer.iteration}")
+
+    # Supervised pre-training (only if not resuming)
+    if args.pretrain_data and not args.resume:
+        from torch.utils.data import DataLoader
+        from rlbridge.training.pretrain_data import (
+            load_all_pbn, generate_supervised_examples,
+            BiddingDataset, make_collate_fn,
+        )
+        from rlbridge.training.supervised import SupervisedTrainer
+
+        logging.info("=== Supervised Pre-Training ===")
+        boards = load_all_pbn([args.pretrain_data])
+        logging.info(f"Loaded {len(boards)} boards from {args.pretrain_data}")
+
+        examples = generate_supervised_examples(boards)
+        logging.info(f"Generated {len(examples)} bidding examples")
+
+        if examples:
+            dataset = BiddingDataset(examples, model_config)
+            collate_fn = make_collate_fn(model_config)
+            dataloader = DataLoader(
+                dataset,
+                batch_size=args.pretrain_batch_size,
+                shuffle=True,
+                collate_fn=collate_fn,
+                num_workers=0,
+            )
+
+            device = training_config.device
+            sup_trainer = SupervisedTrainer(
+                trainer.model, lr=args.pretrain_lr, device=device,
+            )
+
+            for epoch in range(args.pretrain_epochs):
+                metrics = sup_trainer.train_epoch(dataloader)
+                logging.info(
+                    f"Pre-train epoch {epoch + 1}/{args.pretrain_epochs}: "
+                    f"loss={metrics['loss']:.4f} accuracy={metrics['accuracy']:.4f}"
+                )
+
+            logging.info("=== Pre-Training Complete ===")
+        else:
+            logging.warning("No valid examples generated, skipping pre-training")
 
     trainer.run()
 
