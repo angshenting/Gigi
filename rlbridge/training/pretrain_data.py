@@ -1,8 +1,9 @@
-"""PBN parser, auction replay, and PyTorch Dataset for supervised pre-training.
+"""PBN parser, auction/play replay, and PyTorch Dataset for supervised pre-training.
 
-Parses PBN files (from Boards/BBA/, etc.) into (deal, auction) pairs,
-replays each auction to generate (observation, target_action_id) examples,
-and wraps them in a PyTorch Dataset compatible with SupervisedTrainer.
+Parses PBN files (from Boards/BBA/, Boards/BBO/, etc.) into board dicts
+with deal, auction, and optional play data.  Replays each game to generate
+(observation, target_action_id, is_bid) examples for both bidding and card
+play, and wraps them in a PyTorch Dataset compatible with SupervisedTrainer.
 """
 
 import os
@@ -37,6 +38,9 @@ _PBN_SUIT_ORDER = [0, 1, 2, 3]  # S=0, H=1, D=2, C=3
 # Player name to index
 _PLAYER_TO_IDX = {'N': 0, 'E': 1, 'S': 2, 'W': 3}
 
+# PBN card notation: suit letter to card52 suit index
+_SUIT_CHAR_TO_IDX = {'S': 0, 'H': 1, 'D': 2, 'C': 3}
+
 # Vulnerability string normalization
 _VULN_MAP = {
     'None': (False, False),
@@ -65,6 +69,64 @@ _BID_NORMALIZE = {
     'Rdbl': 'XX',
     'XX': 'XX',
 }
+
+
+def pbn_card_to_card52(card_str: str) -> int:
+    """Convert a PBN card string like 'CK' to a card52 index.
+
+    Format: suit_char + rank_char, e.g. 'SA'=0, 'H2'=25, 'CK'=40.
+    """
+    if len(card_str) != 2:
+        raise ValueError(f"Invalid card string: {card_str!r}")
+    suit_i = _SUIT_CHAR_TO_IDX[card_str[0].upper()]
+    rank_i = _RANK_CHAR_TO_IDX[card_str[1].upper()]
+    return suit_i * 13 + rank_i
+
+
+def _parse_play_section(play_starter: str, play_lines: list) -> Optional[list]:
+    """Parse [Play] lines into a list of tricks.
+
+    Args:
+        play_starter: the player character from [Play "X"] tag (W, N, E, S)
+        play_lines: raw text lines from the play section
+
+    Returns:
+        List of tricks, where each trick is a list of (player_idx, card52)
+        tuples in play order (clockwise from the leader of that trick).
+        Returns None if parsing fails.
+    """
+    if play_starter not in _PLAYER_TO_IDX:
+        return None
+
+    starter_idx = _PLAYER_TO_IDX[play_starter]
+    tricks = []
+
+    for line in play_lines:
+        line = line.strip()
+        if not line or line.startswith('[') or line.startswith('%'):
+            continue
+        # Handle "*" annotations (BBO alert markers on cards)
+        line = line.replace('*', '')
+        tokens = line.split()
+        if len(tokens) < 4:
+            continue
+
+        trick = []
+        for col_i, token in enumerate(tokens[:4]):
+            if token == '-':
+                # Incomplete trick
+                break
+            try:
+                card52 = pbn_card_to_card52(token)
+            except (ValueError, KeyError):
+                break
+            player_idx = (starter_idx + col_i) % 4
+            trick.append((player_idx, card52))
+
+        if len(trick) == 4:
+            tricks.append(trick)
+
+    return tricks if tricks else None
 
 
 def _parse_hand_string(hand_str: str) -> Tuple[int, ...]:
@@ -164,7 +226,8 @@ def _normalize_bid(bid_str: str) -> Optional[str]:
 def parse_pbn_file(path: str) -> List[dict]:
     """Parse a single PBN file and return list of board dicts.
 
-    Each dict has keys: 'deal' (Deal), 'auction' (list of BEN bid strings).
+    Each dict has keys: 'deal' (Deal), 'auction' (list of BEN bid strings),
+    'play' (list of tricks or None).
     Boards without a valid [Deal] or [Auction] are skipped.
     """
     boards = []
@@ -176,6 +239,9 @@ def parse_pbn_file(path: str) -> List[dict]:
     tags = {}
     auction_lines = []
     in_auction = False
+    play_lines = []
+    in_play = False
+    play_starter = None
 
     def _flush_board():
         """Try to build a board from accumulated tags."""
@@ -228,8 +294,13 @@ def parse_pbn_file(path: str) -> List[dict]:
             if not bids:
                 return
 
+            # Parse play data if available
+            play_data = None
+            if play_lines and play_starter:
+                play_data = _parse_play_section(play_starter, play_lines)
+
             deal = _make_deal(hands, dealer, vuln_ns, vuln_ew)
-            boards.append({'deal': deal, 'auction': bids})
+            boards.append({'deal': deal, 'auction': bids, 'play': play_data})
 
         except (ValueError, KeyError, IndexError):
             pass  # skip malformed boards
@@ -255,16 +326,27 @@ def parse_pbn_file(path: str) -> List[dict]:
                     tags = {}
                     auction_lines = []
                     in_auction = False
+                    play_lines = []
+                    in_play = False
+                    play_starter = None
 
             if tag_name == 'Auction':
                 in_auction = True
+                in_play = False
                 tags['Auction'] = tag_value
                 auction_lines = []
-            elif tag_name in ('Play', 'Note', 'OptimumResultTable',
+            elif tag_name == 'Play':
+                in_auction = False
+                in_play = True
+                play_starter = tag_value.strip()
+                play_lines = []
+            elif tag_name in ('Note', 'OptimumResultTable',
                               'BidSystemNS', 'BidSystemEW', 'BCFlags'):
                 in_auction = False
+                in_play = False
             else:
                 in_auction = False
+                in_play = False
                 tags[tag_name] = tag_value
             continue
 
@@ -276,6 +358,13 @@ def parse_pbn_file(path: str) -> List[dict]:
                 continue
             auction_lines.append(line)
 
+        # If we're reading play lines
+        if in_play and line.strip():
+            if line.strip().startswith('['):
+                in_play = False
+                continue
+            play_lines.append(line)
+
     # Flush last board
     if tags:
         _flush_board()
@@ -286,7 +375,7 @@ def parse_pbn_file(path: str) -> List[dict]:
 def load_all_pbn(directories: List[str]) -> List[dict]:
     """Load all PBN files from given directories.
 
-    Returns list of board dicts with 'deal' and 'auction' keys.
+    Returns list of board dicts with 'deal', 'auction', and 'play' keys.
     """
     all_boards = []
     for directory in directories:
@@ -368,18 +457,133 @@ def generate_supervised_examples(
     return examples
 
 
-class BiddingDataset(Dataset):
-    """PyTorch Dataset for supervised bidding examples.
+def generate_full_game_examples(
+    boards: List[dict],
+) -> List[Tuple[dict, int, bool]]:
+    """Replay full games to generate (obs, target, is_bid) triples.
+
+    For each board, replays the auction (producing bidding examples) and,
+    if play data is available, continues through card play (producing card
+    play examples).
+
+    Args:
+        boards: list of dicts with 'deal', 'auction', and optional 'play' keys
+
+    Returns:
+        List of (observation_dict, target_action_id, is_bid) tuples.
+    """
+    examples = []
+    skipped = 0
+    bid_count = 0
+    card_count = 0
+
+    for board in boards:
+        deal = board['deal']
+        auction_bids = board['auction']
+        play_data = board.get('play')
+
+        try:
+            state = GameState.initial(deal)
+        except Exception:
+            skipped += 1
+            continue
+
+        board_ok = True
+
+        # --- Replay auction ---
+        for bid_str in auction_bids:
+            if state.phase != 'bidding':
+                break
+
+            try:
+                action_id = bidding_phase.bid_to_action(bid_str)
+            except KeyError:
+                board_ok = False
+                break
+
+            legal = state.legal_actions()
+            if action_id not in legal:
+                board_ok = False
+                break
+
+            player = state.current_player
+            obs = state.observation(player)
+            examples.append((obs, action_id, True))
+            bid_count += 1
+
+            state = state.apply_action(action_id)
+
+        if not board_ok:
+            skipped += 1
+            continue
+
+        # --- Replay card play ---
+        if play_data is None:
+            continue
+
+        if state.phase not in ('opening_lead', 'play'):
+            # Auction ended in pass-out or didn't finish
+            continue
+
+        for trick_data in play_data:
+            # trick_data is [(player_idx, card52), ...] in PBN column order.
+            # We need to reorder to match the game state's play order:
+            # the current_leader leads first, then clockwise.
+            leader = state.current_leader
+            if leader is None:
+                break
+
+            # Build a map from player_idx to card52 for this trick
+            player_to_card = {}
+            for player_idx, card52 in trick_data:
+                player_to_card[player_idx] = card52
+
+            # Play in game order: leader, leader+1, leader+2, leader+3
+            trick_ok = True
+            for offset in range(4):
+                player = (leader + offset) % 4
+                if player not in player_to_card:
+                    trick_ok = False
+                    break
+
+                card52 = player_to_card[player]
+
+                # Validate legality
+                legal = state.legal_actions()
+                if card52 not in legal:
+                    trick_ok = False
+                    break
+
+                obs = state.observation(player)
+                examples.append((obs, card52, False))
+                card_count += 1
+
+                state = state.apply_action(card52)
+
+            if not trick_ok:
+                break
+
+    if skipped > 0:
+        logger.info(f"Skipped {skipped}/{len(boards)} boards (illegal/malformed)")
+    logger.info(
+        f"Generated {len(examples)} examples: "
+        f"{bid_count} bidding, {card_count} card play"
+    )
+    return examples
+
+
+class PretrainDataset(Dataset):
+    """PyTorch Dataset for supervised pre-training (bidding + card play).
 
     Encodes observations lazily to avoid high memory usage with large datasets.
     """
 
-    def __init__(self, examples: List[Tuple[dict, int]],
-                 model_config: ModelConfig = None):
+    def __init__(self, examples, model_config: ModelConfig = None):
         """
         Args:
-            examples: list of (observation_dict, target_action_id) from
-                      generate_supervised_examples()
+            examples: list of (obs, target_action_id, is_bid) from
+                      generate_full_game_examples(), or legacy 2-tuples from
+                      generate_supervised_examples().
             model_config: ModelConfig for encode_observation()
         """
         self.model_config = model_config or ModelConfig()
@@ -389,9 +593,18 @@ class BiddingDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx):
-        obs, action_id = self.examples[idx]
+        ex = self.examples[idx]
+        if len(ex) == 3:
+            obs, action_id, is_bid = ex
+        else:
+            obs, action_id = ex
+            is_bid = True
         enc = encode_observation(obs, self.model_config)
-        return enc, action_id, True  # is_bid=True
+        return enc, action_id, is_bid
+
+
+# Backwards-compatible alias
+BiddingDataset = PretrainDataset
 
 
 def bidding_collate_fn(batch, model_config=None):

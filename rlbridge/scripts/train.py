@@ -57,7 +57,7 @@ def parse_args():
 
     # Supervised pre-training
     parser.add_argument('--pretrain-data', type=str, default=None,
-                        help='Path to directory containing PBN files for pre-training')
+                        help='Comma-separated paths to directories containing PBN files for pre-training')
     parser.add_argument('--pretrain-epochs', type=int, default=5,
                         help='Number of supervised pre-training epochs')
     parser.add_argument('--pretrain-lr', type=float, default=1e-4,
@@ -120,20 +120,23 @@ def main():
     if args.pretrain_data and not args.resume:
         from torch.utils.data import DataLoader
         from rlbridge.training.pretrain_data import (
-            load_all_pbn, generate_supervised_examples,
-            BiddingDataset, make_collate_fn,
+            load_all_pbn, generate_full_game_examples,
+            PretrainDataset, make_collate_fn,
         )
         from rlbridge.training.supervised import SupervisedTrainer
 
         logging.info("=== Supervised Pre-Training ===")
-        boards = load_all_pbn([args.pretrain_data])
-        logging.info(f"Loaded {len(boards)} boards from {args.pretrain_data}")
+        data_dirs = [d.strip() for d in args.pretrain_data.split(',')]
+        boards = load_all_pbn(data_dirs)
+        logging.info(f"Loaded {len(boards)} boards from {data_dirs}")
 
-        examples = generate_supervised_examples(boards)
-        logging.info(f"Generated {len(examples)} bidding examples")
+        examples = generate_full_game_examples(boards)
+        bid_count = sum(1 for _, _, ib in examples if ib)
+        card_count = len(examples) - bid_count
+        logging.info(f"Generated {len(examples)} examples: {bid_count} bidding, {card_count} card play")
 
         if examples:
-            dataset = BiddingDataset(examples, model_config)
+            dataset = PretrainDataset(examples, model_config)
             collate_fn = make_collate_fn(model_config)
             dataloader = DataLoader(
                 dataset,
