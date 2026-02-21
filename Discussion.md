@@ -18,7 +18,7 @@ The system was progressively optimized from 400s/iteration (sequential CPU) to 7
 
 ## Training Results
 
-Six training runs were conducted, totaling ~1,500 iterations and 192,000 games:
+Seven training runs were conducted, totaling ~2,500 iterations and 448,000 games:
 
 | Run | Iterations | Games/iter | Key result |
 |-----|-----------|------------|------------|
@@ -28,8 +28,9 @@ Six training runs were conducted, totaling ~1,500 iterations and 192,000 games:
 | 4   | 500       | 64         | First extended run — avg_imp rose from -0.12 to +1.78, vloss dropped 267 to 34. Eval was broken (raw scores, only 20 games). |
 | 5   | 500       | 64         | Resumed from run 4 with fixed eval. Plateau confirmed: advantage stable at ~+1 IMP vs random, no further improvement. |
 | 6   | 500       | 256        | **Supervised pre-training + all tuning improvements.** Advantage jumped to +3.6 avg / +6.2 peak vs random. Details below. |
+| 7   | 1000      | 256        | Resumed from run 6. Held steady at +3.4 avg advantage over 1,000 iters. Second plateau confirmed. Details below. |
 
-The model clearly learns in the first 500 iterations: value predictions improve dramatically (vloss 267 to 34), entropy declines naturally (1.05 to 0.71), and the model starts beating PAR by ~1.5 IMPs/game. But the second 500 iterations (run 5) show no further progress — all metrics flatline. Run 6 applied four targeted fixes and broke through the plateau.
+The model clearly learns in the first 500 iterations: value predictions improve dramatically (vloss 267 to 34), entropy declines naturally (1.05 to 0.71), and the model starts beating PAR by ~1.5 IMPs/game. But the second 500 iterations (run 5) show no further progress — all metrics flatline. Run 6 applied four targeted fixes and broke through the plateau. Run 7 confirmed a new plateau at ~+3.4 IMP.
 
 ### Run 6: Breaking the Plateau
 
@@ -88,6 +89,53 @@ The model learned to predict expert bids with 83% accuracy before any RL trainin
 - All 500 iterations triggered KL early stopping (at the 0.05 threshold), but typically after 1-7 mini-batches rather than immediately. This is healthier than run 4's behavior (where 0.02 threshold often stopped after just 1 batch).
 - Near-zero pass-outs confirms the model learned sensible opening bids from the supervised data, rather than having to discover them from scratch through RL.
 
+### Run 7: Longer Training — Second Plateau
+
+Run 7 resumed from the run 6 checkpoint (`model_iter_000499.pt`) and ran for 1,000 additional iterations with the same hyperparameters (256 games/iter, cosine temperature 1.0→0.3, target_kl=0.05). The goal was to test whether more training would push past +3.6 IMP.
+
+**Eval progression** (NN vs random, 100 games each checkpoint):
+
+| Iteration | NN IMP | Rand IMP | Advantage |
+|-----------|--------|----------|-----------|
+| 49        | +0.5   | -1.5     | +2.0      |
+| 99        | +2.5   | -2.0     | **+4.5**  |
+| 149       | +1.5   | -2.4     | +3.9      |
+| 199       | +1.5   | -1.9     | +3.3      |
+| 249       | +1.1   | -1.6     | +2.7      |
+| 299       | +1.2   | -2.4     | +3.6      |
+| 349       | +1.5   | -3.2     | **+4.8**  |
+| 399       | +0.5   | -2.2     | +2.8      |
+| 449       | +0.8   | -1.9     | +2.6      |
+| 499       | +1.6   | -2.1     | +3.7      |
+| 549       | +1.2   | -2.2     | +3.4      |
+| 599       | +0.9   | -2.5     | +3.4      |
+| 649       | +1.6   | -2.2     | +3.8      |
+| 699       | +1.1   | -2.3     | +3.4      |
+| 749       | +1.3   | -2.5     | +3.8      |
+| 799       | +1.4   | -2.5     | +4.0      |
+| 849       | +0.3   | -1.5     | +1.8      |
+| 899       | +1.0   | -2.1     | +3.1      |
+| 949       | +0.6   | -2.8     | +3.4      |
+| 999       | +1.1   | -1.7     | +2.8      |
+
+**Key metrics:**
+
+| Metric | Run 6 | Run 7 | Change |
+|--------|-------|-------|--------|
+| Avg advantage vs random | +3.6 IMP | +3.4 IMP | Flat |
+| Peak advantage | +6.2 IMP | +4.8 IMP | Lower peak |
+| Entropy (final) | 0.42 | 0.46 | Similar |
+| Value loss (final) | ~41 | ~59 | Slightly worse |
+| Total training time | ~2h 45m | ~6h | 1000 iters vs 500 |
+
+**Observations:**
+
+- The model held steady at +3.4 IMP average across 20 eval checkpoints — no improvement over run 6, but no degradation either. This is a genuine second plateau.
+- PPO behavior was healthier than run 6: many iterations completed full 2/2 epochs (132 mini-batches) rather than early-stopping after 1 batch. The resumed optimizer state appears better calibrated.
+- Late in training (iter 800+), KL early stopping reverted to triggering after just 1 batch, similar to run 6's late behavior. The policy may be hardening as temperature drops.
+- The gentler cosine schedule (over 1000 iters vs 500) kept temperature higher for longer, but this didn't translate to higher final performance.
+- Zero pass-outs across all 1,000 iterations — the supervised bidding knowledge is fully retained.
+
 ---
 
 ## What Went Well
@@ -106,15 +154,15 @@ The model learned to predict expert bids with 83% accuracy before any RL trainin
 
 ## What Needs Improvement
 
-**The model is still weak.** At +3.6 IMP advantage vs random (run 6), the model is improving but still far from competent. A competent human beats random by 5-10+ IMPs/game. The pre-training and tuning broke the +1 IMP plateau, but the model needs to continue climbing.
+**Second plateau at +3.4 IMP.** Run 7 confirmed that 1,000 additional iterations of self-play do not push past the +3-4 IMP level established by run 6. The model has extracted what it can from pure self-play with the current architecture and hyperparameters. For context, a competent human beats random by 5-10+ IMPs/game. Breaking this plateau likely requires structural changes, not just more training.
 
 **Random is a weak baseline.** Evaluating against random only tells us the model isn't completely broken. A random player makes illegal-level-bad bids and plays random legal cards — any pattern recognition beats it. We have no signal on how the model compares to actual bridge play.
 
-**Self-play has no opponent diversity.** The model plays against itself at all 4 seats. This can lead to co-adapted strategies that don't generalize — both sides develop the same blind spots. There's no pressure to handle different bidding systems or play styles.
+**Self-play has no opponent diversity.** The model plays against itself at all 4 seats. This can lead to co-adapted strategies that don't generalize — both sides develop the same blind spots. There's no pressure to handle different bidding systems or play styles. This is likely a key contributor to the plateau.
 
-**KL early stopping still dominates.** Even with the raised threshold (0.05), 100% of run 6 iterations triggered early stopping. The model is trying to make larger policy updates than the threshold allows. This may be healthy (preventing collapse) or may be limiting — further experimentation needed.
+**Card play is probably the bottleneck.** The supervised pre-training only covered bidding (83% accuracy). Card play was learned entirely from RL self-play against itself. Bridge card play requires inferring partner's and opponents' hands from the auction and prior plays — a much harder inference task that may not emerge from self-play alone.
 
-**Mid-training performance dip.** Run 6 showed a dip from +6.2 advantage (iter 49) to +1.6 (iter 149) before recovering. RL exploration is partially undoing the supervised pre-training. A higher pre-training learning rate, more epochs, or a gentler RL warm-up could help preserve the supervised knowledge.
+**KL early stopping limits late-stage learning.** In both runs 6 and 7, late iterations triggered KL early stopping after just 1 mini-batch. The policy has hardened and small updates push past the KL threshold immediately. This effectively freezes the policy in later training.
 
 **No experiment tracking.** Training metrics are only available in log files. There's no WandB, TensorBoard, or equivalent for visualizing learning curves, comparing runs, or detecting anomalies early.
 
@@ -122,7 +170,7 @@ The model learned to predict expert bids with 83% accuracy before any RL trainin
 
 ## What To Do Next
 
-### High Priority — Continue Climbing
+### Completed
 
 ~~**1. Enable temperature schedule.**~~ Done in run 6. Cosine decay 1.0 to 0.3.
 
@@ -132,27 +180,29 @@ The model learned to predict expert bids with 83% accuracy before any RL trainin
 
 ~~**4. Supervised pre-training.**~~ Done in run 6. PBN parser + BiddingDataset + pre-training pipeline. 563K examples from BBA, 83% accuracy after 5 epochs.
 
-**5. Longer training.** Run 6 showed the model still improving at iter 499 (+4.0 advantage). Run 7 should continue for 1,000-2,000 iterations, resuming from the run 6 checkpoint. The cosine schedule should be extended to match the new total iteration count.
+~~**5. Longer training.**~~ Done in run 7. 1,000 additional iterations confirmed second plateau at +3.4 IMP — more training alone doesn't help.
 
-**6. Protect pre-trained knowledge.** The mid-training dip (iter 49: +6.2 to iter 149: +1.6) suggests RL is partially overwriting supervised knowledge. Options: (a) lower the RL learning rate for the first 100 iterations, (b) add a supervised loss term alongside PPO, (c) freeze the bidding head for the first N iterations.
+### High Priority — Break the Second Plateau
 
-**7. Disable or further raise KL threshold.** All 500 run 6 iterations hit the 0.05 KL cap, often after just 1 mini-batch. Try 0.10 or disable entirely (`--target-kl 0`) for a run to see if larger updates help or cause collapse.
+**6. Supervised card play pre-training.** The current pre-training only covers bidding. Card play is likely the bottleneck — it requires hand inference from the auction and signaling, which is hard to learn from self-play alone. Parse the [Play] sections from BBO PBN files (which include full card-by-card records) and pre-train the card play head with cross-entropy loss.
 
-### Medium Priority — Better Evaluation
+**7. Evaluate against BEN.** Replace the random baseline with BEN's existing models. This gives a meaningful skill measurement and reveals whether the plateau is in bidding, card play, or both. BEN already has agents for bidding and play — wrapping them in the `Agent` interface should be straightforward.
 
-**8. Evaluate against BEN.** Replace the random baseline with BEN's existing models (or a mix). This gives a meaningful skill measurement. BEN already has agents for bidding and play — wrapping them in the `Agent` interface should be straightforward.
+**8. Opponent pool / league training.** Instead of pure self-play, maintain a pool of past checkpoints and sample opponents from the pool. Self-play co-adaptation is a likely contributor to the plateau — both sides develop the same blind spots. Diversity pressure from varied opponents could force more robust play.
 
-**9. Add experiment tracking.** Integrate WandB or TensorBoard to log training metrics, eval results, and hyperparameters. This makes it much easier to compare runs and diagnose issues. A few lines in `trainer.py` and `ppo.py`.
+**9. Disable or further raise KL threshold.** Both runs 6 and 7 show late-stage KL early stopping after just 1 mini-batch. Try 0.10 or disable entirely (`--target-kl 0`) to see if larger updates help or cause collapse.
 
-### Lower Priority — Structural Changes
+### Medium Priority
 
-**10. Opponent pool / league training.** Instead of pure self-play, maintain a pool of past checkpoints and sample opponents from the pool. This creates diversity pressure and prevents co-adaptation. Implementations like OpenAI Five and AlphaStar used this approach.
+**10. Add experiment tracking.** Integrate WandB or TensorBoard to log training metrics, eval results, and hyperparameters. This makes it much easier to compare runs and diagnose issues.
 
 **11. Increase model capacity.** The current 5.1M parameter model may not have enough capacity for bridge's complexity. Try d_model=512, n_layers=8 (~20M params). Bridge has a large state space (bidding conventions, card play inference, signaling) that may need more representational power.
 
-**12. Separate bidding and play.** Currently one transformer handles both phases. Bridge bidding and card play are quite different tasks — bidding involves partnership communication and convention systems, while card play involves inference and planning. Separate specialized networks might learn each phase more effectively.
+**12. Reward shaping.** The current reward is purely terminal (IMP at game end). Intermediate rewards for good bidding (reaching reasonable contracts) or good play (winning tricks when expected) could provide denser signal.
 
-**13. Reward shaping.** The current reward is purely terminal (IMP at game end). Intermediate rewards for good bidding (reaching reasonable contracts) or good play (winning tricks when expected) could provide denser signal, especially early in training when the model can't yet connect bidding decisions to final outcomes 13 tricks later.
+### Lower Priority
+
+**13. Separate bidding and play.** Currently one transformer handles both phases. Bridge bidding and card play are quite different tasks — bidding involves partnership communication and convention systems, while card play involves inference and planning. Separate specialized networks might learn each phase more effectively.
 
 ---
 
@@ -160,6 +210,6 @@ The model learned to predict expert bids with 83% accuracy before any RL trainin
 
 The foundation is solid: correct game engine, working training loop, principled rewards, fast iteration. The model demonstrably learns from scratch and beats random play.
 
-After runs 4-5 plateaued at +1 IMP, run 6 applied four targeted fixes — supervised pre-training from 563K expert bidding examples, cosine temperature decay, raised KL threshold, and 4x more games per iteration. The result was a **3.6x improvement** in average advantage vs random (+1.0 to +3.6 IMP), with a peak of +6.2 IMP. The model now makes confident, sensible bids (83% match rate with expert data) and near-zero pass-out rate.
+After runs 4-5 plateaued at +1 IMP, run 6 applied four targeted fixes — supervised pre-training from 563K expert bidding examples, cosine temperature decay, raised KL threshold, and 4x more games per iteration. The result was a **3.6x improvement** in average advantage vs random (+1.0 to +3.6 IMP), with a peak of +6.2 IMP. Run 7 extended training by 1,000 iterations and confirmed a second plateau at +3.4 IMP — more self-play iterations alone don't help.
 
-The highest-impact next steps are: longer training runs (the model was still improving at iter 499), protecting pre-trained knowledge from RL perturbation, and evaluating against BEN rather than random.
+The model has likely extracted what it can from pure self-play at this scale. The highest-impact next steps are: supervised card play pre-training (the current bottleneck), evaluating against BEN for a meaningful skill measurement, and opponent diversity to break self-play co-adaptation.
