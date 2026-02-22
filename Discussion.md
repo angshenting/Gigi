@@ -241,15 +241,15 @@ To get a meaningful skill measurement beyond random, we evaluated our models aga
 
 ## What Needs Improvement
 
-**Second plateau at +3.4 IMP.** Runs 7-8 confirmed that neither more self-play iterations nor card play pre-training (at current data scale) push past the +3-4 IMP level established by run 6. The model has extracted what it can from pure self-play with the current architecture and data. For context, a competent human beats random by 5-10+ IMPs/game. Breaking this plateau likely requires structural changes or significantly more supervised data.
+**5 IMP gap vs BEN.** Our best model (run 7) loses to BEN's pure NNs by -5.18 IMP/deal. The gap comes from three structural disadvantages: (1) one generalist model vs BEN's 8+ specialized models, (2) self-play co-adaptation producing strategies that don't transfer to competent opponents, (3) card play learned entirely from self-play with no expert supervision. The BEN evaluation (see above) also revealed that performance vs random doesn't predict performance vs BEN — run 6 was better vs random but worse vs BEN than run 7.
 
-**Random is a weak baseline.** Evaluating against random only tells us the model isn't completely broken. A random player makes illegal-level-bad bids and plays random legal cards — any pattern recognition beats it. The BEN evaluation (see above) now provides a meaningful skill measurement: our best model loses to BEN's NNs by ~5 IMPs/deal.
+**Self-play co-adaptation is a key bottleneck.** The model plays against itself at all 4 seats, developing paired strategies that exploit its own weaknesses. Against BEN — which uses real bidding conventions and competent card play — these strategies don't transfer. Training against BEN directly (now feasible via the BenAgent wrapper) would address this.
 
-**Self-play has no opponent diversity.** The model plays against itself at all 4 seats. This can lead to co-adapted strategies that don't generalize — both sides develop the same blind spots. There's no pressure to handle different bidding systems or play styles. This is likely a key contributor to the plateau.
+**No position specialization.** BEN uses 8 separate card play models (lefty/dummy/righty/declarer × NT/suit), each specialized for its role. Our single transformer uses identical weights for all positions. Declarer play (planning how to take tricks) and defensive play (inferring partner's signals, finding the killing defense) are fundamentally different skills that benefit from specialization.
 
-**Card play is probably the bottleneck, but needs more data.** Run 8 added card play pre-training, but with only ~15K examples from ~300 BBO boards (vs 567K bidding examples), the signal was insufficient. Card play requires inferring partner's and opponents' hands from the auction and prior plays — a much harder inference task that needs both more supervised data and potentially better self-play exploration.
+**Card play data gap.** Our model learned card play entirely from RL self-play (run 7) or from 15K insufficient examples (run 8). BEN's card play models were trained on far more supervised expert data. Distilling from BEN's own play could generate unlimited card play training data without external acquisition.
 
-**KL early stopping limits late-stage learning.** In both runs 6 and 7, late iterations triggered KL early stopping after just 1 mini-batch. The policy has hardened and small updates push past the KL threshold immediately. This effectively freezes the policy in later training.
+**KL early stopping limits late-stage learning.** In both runs 6 and 7, late iterations triggered KL early stopping after just 1 mini-batch. The policy has hardened and small updates push past the KL threshold immediately. This effectively freezes the policy in later training. Switching to BEN opponents will require larger policy updates, making this constraint even more limiting.
 
 **No experiment tracking.** Training metrics are only available in log files. There's no WandB, TensorBoard, or equivalent for visualizing learning curves, comparing runs, or detecting anomalies early.
 
@@ -273,25 +273,33 @@ To get a meaningful skill measurement beyond random, we evaluated our models aga
 
 ~~**8. Evaluate against BEN.**~~ Done. BEN's NNs wrapped in our Agent interface (`rlbridge/engine/ben_agent.py`) with pure-NN config (`src/config/nn_only.conf`). Paired IMP comparison across all runs shows our best model (run 7) loses by -5.18 IMP/deal. All models lose by 4-8 IMPs. See "Evaluation Against BEN" section above for full results.
 
-### High Priority — Break the Second Plateau
+### High Priority — Close the Gap Against BEN
 
-**7. More card play data + resume from run 7.** The card play pre-training pipeline works, but needs 10-100x more data to be effective. Acquire larger PBN archives (BridgeComposer, ACBL, Vugraph) with play records. Then resume from run 7's checkpoint (preserving learned RL policy) and fine-tune with the expanded card play data, rather than starting from scratch.
+The BEN evaluation revealed three structural disadvantages: (1) one generalist 5.1M-param model vs BEN's suite of specialized models, (2) RL self-play produces co-adapted strategies that don't transfer to a competent opponent, (3) card play was learned entirely from self-play with no expert supervision. The strategies below are prioritized by expected impact on closing the -5.18 IMP gap.
 
-**9. Opponent pool / league training.** Instead of pure self-play, maintain a pool of past checkpoints and sample opponents from the pool. Self-play co-adaptation is a likely contributor to the plateau — both sides develop the same blind spots. Diversity pressure from varied opponents could force more robust play.
+**7. Train against BEN instead of self-play.** The BenAgent wrapper already exists. Use BEN's NNs as opponents (EW) during RL self-play training, resuming from run 7's checkpoint. This directly addresses the co-adaptation problem — the model faces a strong, realistic opponent using real bridge conventions. Self-play teaches you to exploit yourself; training against BEN teaches you to play bridge. Implementation: swap the EW agents in the training loop from `NNAgent` to `BenAgent`. Evaluate with the existing `evaluate_vs_ben.py` script. This is the single highest-impact change because it simultaneously improves both bidding (facing real conventions) and card play (facing competent defense/declarer play).
 
-**10. Disable or further raise KL threshold.** Both runs 6 and 7 show late-stage KL early stopping after just 1 mini-batch. Try 0.10 or disable entirely (`--target-kl 0`) to see if larger updates help or cause collapse.
+**8. Distill from BEN's play.** Have BEN play thousands of games against itself and record every decision — both bidding and card play. Use these as supervised training data for our model. This solves the card play data problem (unlimited examples vs. 15K from PBN) and provides expert-quality targets. The pre-training pipeline already supports both bidding and card play examples. Target: 10K+ games (130K+ card play examples, 30K+ bidding examples). This can be combined with item 7 — distill first, then fine-tune with RL against BEN.
+
+**9. Position-conditional card play.** BEN's biggest architectural advantage is 8 specialized card play models (lefty/dummy/righty/declarer × NT/suit). Our single transformer uses the same weights regardless of position. Add position (declarer/LHO/dummy/RHO) and strain (NT/suit) as conditioning inputs — either as additional embeddings fed into the transformer, or as separate output heads sharing the same backbone. This gives specialization without maintaining 8 separate models. The position and strain information is already available in the observation; it just isn't explicitly conditioning the card play policy head.
+
+**10. Opponent pool with BEN.** During training, randomly assign opponents from a pool: {BEN, current model, past checkpoints}. This forces robustness across different play styles. Start with 50% BEN + 50% self-play, then tune the ratio. Unlike pure self-play, this prevents co-adaptation while maintaining the exploration benefits of playing against an evolving policy.
 
 ### Medium Priority
 
-**11. Add experiment tracking.** Integrate WandB or TensorBoard to log training metrics, eval results, and hyperparameters. This makes it much easier to compare runs and diagnose issues.
+**11. Increase model capacity.** The current 5.1M parameter model (d_model=256, 6 layers) may not have enough capacity for bridge's complexity. Try d_model=512, n_layers=8 (~20M params). BEN's collective model suite (bidding LSTM + 8 card play NNs + lead models) likely exceeds this in total parameters, and each component is specialized. A larger backbone could better support position-conditional heads (item 9).
 
-**12. Increase model capacity.** The current 5.1M parameter model may not have enough capacity for bridge's complexity. Try d_model=512, n_layers=8 (~20M params). Bridge has a large state space (bidding conventions, card play inference, signaling) that may need more representational power.
+**12. Reward shaping with BEN reference scores.** Instead of IMP-vs-PAR (which measures absolute quality), use IMP-vs-BEN as the training reward. For each deal, play it with BEN to get a reference score, then reward our model for beating BEN's result. This directly optimizes for closing the gap and provides a more informative gradient — the model learns not just "play well" but "play better than BEN on this deal."
 
-**13. Reward shaping.** The current reward is purely terminal (IMP at game end). Intermediate rewards for good bidding (reaching reasonable contracts) or good play (winning tricks when expected) could provide denser signal.
+**13. Disable or further raise KL threshold.** Both runs 6 and 7 show late-stage KL early stopping after just 1 mini-batch. Try 0.10 or disable entirely (`--target-kl 0`). After switching to BEN opponents (item 7), the policy will need to make larger updates to adapt — a tight KL threshold would prevent this adaptation.
+
+**14. Add experiment tracking.** Integrate WandB or TensorBoard to log training metrics, eval results, and hyperparameters. With BEN evaluation now providing a meaningful metric, tracking IMP-vs-BEN across training iterations becomes essential for diagnosing whether changes are working.
 
 ### Lower Priority
 
-**14. Separate bidding and play.** Currently one transformer handles both phases. Bridge bidding and card play are quite different tasks — bidding involves partnership communication and convention systems, while card play involves inference and planning. Separate specialized networks might learn each phase more effectively.
+**15. Separate bidding and play networks.** Currently one transformer handles both phases. Bridge bidding and card play are fundamentally different tasks — bidding involves partnership communication and convention systems, while card play involves inference and planning. Separate specialized networks might learn each phase more effectively. However, position-conditional heads (item 9) may capture most of this benefit with less complexity.
+
+**16. More external card play data.** Acquire larger PBN archives (BridgeComposer, ACBL, Vugraph) with play records. This is lower priority now because distilling from BEN (item 8) can generate unlimited card play data without external acquisition. External data becomes valuable if BEN distillation proves insufficient — real expert play may contain patterns that BEN's NNs don't capture.
 
 ---
 
@@ -305,4 +313,4 @@ Run 8 tested card play pre-training from BBO PBN files (~15K card play examples)
 
 Evaluation against BEN's pre-trained neural networks (pure NN, no search) gives a meaningful skill measurement: our best model (run 7) loses by **-5.18 IMP/deal** (95% CI: [-8.2, -2.2]). All models lose by 4-8 IMPs. BEN's supervised NNs, trained on 8,730+ expert games with 8 specialized position models, have a substantial edge over our single 5.1M-parameter transformer trained via RL self-play. The gap is significant but not enormous — roughly the difference between an intermediate and advanced player.
 
-The highest-impact next steps are: acquiring more card play data and fine-tuning from run 7's checkpoint (rather than starting fresh), opponent diversity to break self-play co-adaptation, and further raising or disabling the KL threshold.
+The highest-impact next steps are: (1) training against BEN instead of self-play — the BenAgent wrapper already exists, and this directly addresses the co-adaptation problem that limits transfer to competent opponents; (2) distilling from BEN's play to generate unlimited supervised card play data; (3) adding position-conditional card play heads to match BEN's architectural specialization.
