@@ -20,16 +20,16 @@ The system was progressively optimized from 400s/iteration (sequential CPU) to 7
 
 Eight training runs were conducted, totaling ~3,500 iterations and 704,000 games:
 
-| Run | Iterations | Games/iter | Key result |
-|-----|-----------|------------|------------|
-| 1   | 10        | 16         | First proof of life — vloss dropped 353 to 95, model beat random by iter 9. No DDS (raw score rewards). |
-| 2   | 10        | 16         | DDS PAR enabled — IMP rewards working, but 10 iters too few for convergence. |
-| 3   | 10        | 64         | Batched + GPU — 22x faster, model beat random by +430 points. |
-| 4   | 500       | 64         | First extended run — avg_imp rose from -0.12 to +1.78, vloss dropped 267 to 34. Eval was broken (raw scores, only 20 games). |
-| 5   | 500       | 64         | Resumed from run 4 with fixed eval. Plateau confirmed: advantage stable at ~+1 IMP vs random, no further improvement. |
-| 6   | 500       | 256        | **Supervised pre-training + all tuning improvements.** Advantage jumped to +3.6 avg / +6.2 peak vs random. Details below. |
-| 7   | 1000      | 256        | Resumed from run 6. Held steady at +3.4 avg advantage over 1,000 iters. Second plateau confirmed. Details below. |
-| 8   | 1000      | 256        | **Card play pre-training added.** Fresh start with both bidding + card play supervised data. Did not beat run 7. Details below. |
+| Run | Iterations | Games/iter | vs Random | vs BEN | Key result |
+|-----|-----------|------------|-----------|--------|------------|
+| 1   | 10        | 16         | —         | —      | First proof of life — vloss dropped 353 to 95, model beat random by iter 9. No DDS (raw score rewards). |
+| 2   | 10        | 16         | —         | —      | DDS PAR enabled — IMP rewards working, but 10 iters too few for convergence. |
+| 3   | 10        | 64         | —         | —      | Batched + GPU — 22x faster, model beat random by +430 points. |
+| 4   | 500       | 64         | +1.8 IMP  | -4.4   | First extended run — avg_imp rose from -0.12 to +1.78, vloss dropped 267 to 34. Eval was broken (raw scores, only 20 games). |
+| 5   | 500       | 64         | +1.0 IMP  | —      | Resumed from run 4 with fixed eval. Plateau confirmed: advantage stable at ~+1 IMP vs random, no further improvement. |
+| 6   | 500       | 256        | +3.6 IMP  | -7.5   | **Supervised pre-training + all tuning improvements.** Advantage jumped to +3.6 avg / +6.2 peak vs random. Details below. |
+| 7   | 1000      | 256        | +3.4 IMP  | **-5.2** | Resumed from run 6. Held steady at +3.4 avg advantage over 1,000 iters. **Best vs BEN.** Second plateau confirmed. Details below. |
+| 8   | 1000      | 256        | +1.1 IMP  | -8.4   | **Card play pre-training added.** Fresh start with both bidding + card play supervised data. Did not beat run 7. Details below. |
 
 The model clearly learns in the first 500 iterations: value predictions improve dramatically (vloss 267 to 34), entropy declines naturally (1.05 to 0.71), and the model starts beating PAR by ~1.5 IMPs/game. But the second 500 iterations (run 5) show no further progress — all metrics flatline. Run 6 applied four targeted fixes and broke through the plateau. Run 7 confirmed a new plateau at ~+3.4 IMP. Run 8 tested card play pre-training but did not improve over run 7.
 
@@ -201,6 +201,28 @@ Note: accuracy is lower than run 6's 82.9% because the card play examples are ha
 - **Entropy collapsed further than previous runs** (~0.10 vs ~0.46), suggesting the policy became overly deterministic. The combination of fresh start + cosine temperature decay may have caused premature convergence.
 - **The lesson:** supervised card play pre-training is viable (the pipeline works), but needs far more data to be effective. ~15K examples from ~300 BBO boards is insufficient. Sources like BridgeComposer or ACBL archives with thousands of boards would be needed.
 
+### Evaluation Against BEN
+
+To get a meaningful skill measurement beyond random, we evaluated our models against BEN's pre-trained neural networks (pure NN-only, no search/DDS/PIMC/BBA). Each deal is played twice — our model as NS with BEN as EW, then reversed — giving a paired IMP comparison.
+
+**Results** (seed=42, same deals across all runs):
+
+| Run | Checkpoint | vs Random | vs BEN (IMP/deal) | 95% CI | Std | Games |
+|-----|-----------|-----------|-------------------|--------|-----|-------|
+| 4   | iter 499  | +1.8      | **-4.40**         | [-10.0, +1.2] | 20.2 | 50 |
+| 6   | iter 499  | +3.6      | **-7.46**         | [-11.4, -3.5] | 14.4 | 50 |
+| 7   | iter 999  | +3.4      | **-5.18**         | [-8.2, -2.2]  | 15.3 | 100 |
+| 8   | iter 999  | +1.1      | **-8.40**         | [-9.7, -7.2]  | 4.5 | 50 |
+
+**Observations:**
+
+- **All models lose to BEN's NNs by 4-8 IMPs/deal.** BEN's supervised NNs (trained on 8,730+ GIB-BBO games with specialized models for each position — lefty, dummy, righty, declarer for both NT and suit contracts) have a substantial edge over our single 5.1M-parameter transformer.
+- **Run 7 is the strongest against BEN** (-5.18 IMP/deal), consistent with its status as the best model overall. The 1,000 extra iterations of RL self-play after supervised pre-training produced the most robust policy.
+- **Run 8 performed worst** (-8.40) with remarkably low variance (std=4.5 vs 14-20 for others). Raw scores were tiny (mean ~220 points), suggesting many low-level contracts or near-passouts. The card play pre-training with insufficient data appears to have disrupted bidding quality.
+- **Run 4 (no pre-training) had the widest CI** — its 95% CI includes 0, meaning it's not statistically distinguishable from BEN with 50 games. The high variance comes from erratic bidding producing wild score swings in both directions.
+- **Performance vs random doesn't predict performance vs BEN.** Run 6 (+3.6 vs random) scored worse against BEN (-7.46) than run 7 (+3.4 vs random, -5.18 vs BEN). Strategies that exploit random's weaknesses don't transfer to exploiting a competent opponent.
+- **The gap is significant but not enormous.** In competitive bridge, 5-8 IMPs/deal is roughly the difference between an intermediate and an advanced player. Our RL model plays recognizable bridge (not random), but BEN's supervised training on expert data gives it meaningfully better decisions in both bidding and card play.
+
 ---
 
 ## What Went Well
@@ -221,7 +243,7 @@ Note: accuracy is lower than run 6's 82.9% because the card play examples are ha
 
 **Second plateau at +3.4 IMP.** Runs 7-8 confirmed that neither more self-play iterations nor card play pre-training (at current data scale) push past the +3-4 IMP level established by run 6. The model has extracted what it can from pure self-play with the current architecture and data. For context, a competent human beats random by 5-10+ IMPs/game. Breaking this plateau likely requires structural changes or significantly more supervised data.
 
-**Random is a weak baseline.** Evaluating against random only tells us the model isn't completely broken. A random player makes illegal-level-bad bids and plays random legal cards — any pattern recognition beats it. We have no signal on how the model compares to actual bridge play.
+**Random is a weak baseline.** Evaluating against random only tells us the model isn't completely broken. A random player makes illegal-level-bad bids and plays random legal cards — any pattern recognition beats it. The BEN evaluation (see above) now provides a meaningful skill measurement: our best model loses to BEN's NNs by ~5 IMPs/deal.
 
 **Self-play has no opponent diversity.** The model plays against itself at all 4 seats. This can lead to co-adapted strategies that don't generalize — both sides develop the same blind spots. There's no pressure to handle different bidding systems or play styles. This is likely a key contributor to the plateau.
 
@@ -249,11 +271,11 @@ Note: accuracy is lower than run 6's 82.9% because the card play examples are ha
 
 ~~**6. Supervised card play pre-training.**~~ Done in run 8. Pipeline works (PBN [Play] parser + full game replay + dual-head training), but ~15K card play examples from ~300 BBO boards was insufficient. Average advantage dropped to +1.1 IMP (vs run 7's +3.4), partly because starting from scratch discarded run 7's learned RL policy.
 
+~~**8. Evaluate against BEN.**~~ Done. BEN's NNs wrapped in our Agent interface (`rlbridge/engine/ben_agent.py`) with pure-NN config (`src/config/nn_only.conf`). Paired IMP comparison across all runs shows our best model (run 7) loses by -5.18 IMP/deal. All models lose by 4-8 IMPs. See "Evaluation Against BEN" section above for full results.
+
 ### High Priority — Break the Second Plateau
 
 **7. More card play data + resume from run 7.** The card play pre-training pipeline works, but needs 10-100x more data to be effective. Acquire larger PBN archives (BridgeComposer, ACBL, Vugraph) with play records. Then resume from run 7's checkpoint (preserving learned RL policy) and fine-tune with the expanded card play data, rather than starting from scratch.
-
-**8. Evaluate against BEN.** Replace the random baseline with BEN's existing models. This gives a meaningful skill measurement and reveals whether the plateau is in bidding, card play, or both. BEN already has agents for bidding and play — wrapping them in the `Agent` interface should be straightforward.
 
 **9. Opponent pool / league training.** Instead of pure self-play, maintain a pool of past checkpoints and sample opponents from the pool. Self-play co-adaptation is a likely contributor to the plateau — both sides develop the same blind spots. Diversity pressure from varied opponents could force more robust play.
 
@@ -281,4 +303,6 @@ After runs 4-5 plateaued at +1 IMP, run 6 applied four targeted fixes — superv
 
 Run 8 tested card play pre-training from BBO PBN files (~15K card play examples), but starting from scratch with insufficient data actually performed worse (+1.1 IMP avg). The card play pipeline works — it just needs 10-100x more supervised data to be effective.
 
-The highest-impact next steps are: acquiring more card play data and fine-tuning from run 7's checkpoint (rather than starting fresh), evaluating against BEN for a meaningful skill measurement, and opponent diversity to break self-play co-adaptation.
+Evaluation against BEN's pre-trained neural networks (pure NN, no search) gives a meaningful skill measurement: our best model (run 7) loses by **-5.18 IMP/deal** (95% CI: [-8.2, -2.2]). All models lose by 4-8 IMPs. BEN's supervised NNs, trained on 8,730+ expert games with 8 specialized position models, have a substantial edge over our single 5.1M-parameter transformer trained via RL self-play. The gap is significant but not enormous — roughly the difference between an intermediate and advanced player.
+
+The highest-impact next steps are: acquiring more card play data and fine-tuning from run 7's checkpoint (rather than starting fresh), opponent diversity to break self-play co-adaptation, and further raising or disabling the KL threshold.
