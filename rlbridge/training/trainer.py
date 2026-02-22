@@ -26,7 +26,8 @@ class SelfPlayTrainer:
     """Self-play RL training loop for bridge."""
 
     def __init__(self, model_config: ModelConfig = None,
-                 training_config: TrainingConfig = None):
+                 training_config: TrainingConfig = None,
+                 ben_models=None):
         self.model_config = model_config or ModelConfig()
         self.training_config = training_config or TrainingConfig()
 
@@ -35,6 +36,7 @@ class SelfPlayTrainer:
             self.model, self.training_config, self.model_config
         )
         self.device = self.training_config.device
+        self.ben_models = ben_models
 
         self.iteration = 0
         self.best_eval_score = float('-inf')
@@ -109,13 +111,47 @@ class SelfPlayTrainer:
                 self._checkpoint(iteration)
 
     def _self_play(self) -> list:
-        """Run self-play games with batched inference."""
+        """Run self-play games (batched or vs BEN)."""
+        if self.ben_models is not None:
+            return self._self_play_vs_ben()
+
         self.model.eval()
         temperature = compute_temperature(self.training_config, self.iteration)
         deals = [Deal.random() for _ in range(self.training_config.games_per_iteration)]
         runner = BatchGameRunner(self.model, self.model_config,
                                  temperature, self.device)
         results = runner.play_games(deals)
+        self.model.train()
+        return results
+
+    def _self_play_vs_ben(self) -> list:
+        """Run games with NN as NS and BEN as EW (sequential)."""
+        from rlbridge.engine.ben_agent import BenAgent
+
+        self.model.eval()
+        temperature = compute_temperature(self.training_config, self.iteration)
+        n_games = self.training_config.games_per_iteration
+        results = []
+
+        for i in range(n_games):
+            deal = Deal.random()
+            agents = [
+                NNAgent(self.model, self.model_config,
+                        temperature=temperature, device=self.device),  # N
+                BenAgent(self.ben_models, deal),                       # E
+                NNAgent(self.model, self.model_config,
+                        temperature=temperature, device=self.device),  # S
+                BenAgent(self.ben_models, deal),                       # W
+            ]
+            try:
+                result = Game(agents, deal).play()
+                results.append(result)
+            except Exception as e:
+                logger.debug(f"BEN game {i} failed: {e}")
+
+        if len(results) < n_games:
+            logger.info(f"BEN self-play: {len(results)}/{n_games} games succeeded")
+
         self.model.train()
         return results
 
@@ -131,11 +167,17 @@ class SelfPlayTrainer:
     def _process_trajectories(self, results: list) -> list:
         """Convert game results into PPO training data."""
         all_trajectories = []
+        filter_ns = self.ben_models is not None
 
         for result in results:
             returns = assign_rewards(result)
 
             for step, ret in zip(result.trajectory, returns):
+                # Skip EW steps when training vs BEN — BenAgent returns
+                # dummy log_prob=0.0, value=0.0 which would break PPO.
+                if filter_ns and step.player not in (0, 2):
+                    continue
+
                 advantage = ret - step.value_estimate
                 is_bid = step.observation['phase'] == 'bidding'
 
@@ -212,7 +254,65 @@ class SelfPlayTrainer:
             f"({n_games} games, {elapsed:.1f}s)"
         )
 
+        if self.ben_models is not None:
+            self._evaluate_vs_ben(iteration)
+
         self.model.train()
+
+    def _evaluate_vs_ben(self, iteration: int):
+        """Evaluate current model against BEN using paired IMP comparison."""
+        from rlbridge.engine.ben_agent import BenAgent
+        from compare import get_imps
+
+        t0 = time.time()
+        rng = np.random.RandomState(42)
+        n_games = self.training_config.eval_games
+
+        deals = [Deal.random(rng) for _ in range(n_games)]
+        imp_advantages = []
+
+        for deal in deals:
+            # Match 1: NN as NS, BEN as EW
+            agents1 = [
+                NNAgent(self.model, self.model_config,
+                        temperature=0.5, device=self.device),  # N
+                BenAgent(self.ben_models, deal),                # E
+                NNAgent(self.model, self.model_config,
+                        temperature=0.5, device=self.device),  # S
+                BenAgent(self.ben_models, deal),                # W
+            ]
+            try:
+                r1 = Game(agents1, deal).play()
+                score_ns_1 = r1.score_ns
+            except Exception:
+                continue
+
+            # Match 2: BEN as NS, NN as EW
+            agents2 = [
+                BenAgent(self.ben_models, deal),                # N
+                NNAgent(self.model, self.model_config,
+                        temperature=0.5, device=self.device),  # E
+                BenAgent(self.ben_models, deal),                # S
+                NNAgent(self.model, self.model_config,
+                        temperature=0.5, device=self.device),  # W
+            ]
+            try:
+                r2 = Game(agents2, deal).play()
+                score_ns_2 = r2.score_ns
+            except Exception:
+                continue
+
+            imp = get_imps(score_ns_1, score_ns_2)
+            imp_advantages.append(imp)
+
+        avg_imp = np.mean(imp_advantages) if imp_advantages else 0.0
+        elapsed = time.time() - t0
+
+        logger.info(
+            f"EVAL-BEN iter {iteration}: "
+            f"vs_ben={avg_imp:+.2f} IMP/deal "
+            f"({len(imp_advantages)} paired deals, {elapsed:.1f}s)"
+        )
 
     def _checkpoint(self, iteration: int):
         """Save model checkpoint."""

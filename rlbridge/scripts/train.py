@@ -55,6 +55,12 @@ def parse_args():
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume from')
 
+    # BEN opponent
+    parser.add_argument('--ben-opponent', action='store_true',
+                        help='Train against BEN NNs as EW opponent')
+    parser.add_argument('--ben-conf', type=str, default=None,
+                        help='Path to BEN config (default: src/config/nn_only.conf)')
+
     # Supervised pre-training
     parser.add_argument('--pretrain-data', type=str, default=None,
                         help='Comma-separated paths to directories containing PBN files for pre-training')
@@ -106,7 +112,27 @@ def main():
         tc_kwargs['device'] = args.device
     training_config = TrainingConfig(**tc_kwargs)
 
-    trainer = SelfPlayTrainer(model_config, training_config)
+    # Load BEN models if training against BEN
+    ben_models = None
+    if args.ben_opponent:
+        import tensorflow as tf
+        tf.config.set_visible_devices([], 'GPU')  # TF on CPU only; doesn't affect PyTorch GPU
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        src_dir = os.path.join(repo_root, 'src')
+        if src_dir not in sys.path:
+            sys.path.insert(0, src_dir)
+
+        from configparser import ConfigParser
+        from nn.models_tf2 import Models
+
+        conf_path = args.ben_conf or os.path.join(src_dir, 'config', 'nn_only.conf')
+        conf = ConfigParser()
+        conf.read(conf_path)
+        ben_models = Models.from_conf(conf, base_path=repo_root, verbose=True)
+        logging.info(f"Loaded BEN models from {conf_path}")
+
+    trainer = SelfPlayTrainer(model_config, training_config, ben_models=ben_models)
 
     if args.resume:
         import torch

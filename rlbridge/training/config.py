@@ -51,6 +51,10 @@ class TrainingConfig:
     # Device (auto-detects CUDA)
     device: str = field(default_factory=_default_device)
 
+    # BEN opponent
+    use_ben_opponent: bool = False
+    ben_conf_path: Optional[str] = None
+
 
 def compute_temperature(config: TrainingConfig, iteration: int) -> float:
     """Compute temperature for a given iteration based on the schedule.
