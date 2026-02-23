@@ -18,7 +18,7 @@ The system was progressively optimized from 400s/iteration (sequential CPU) to 7
 
 ## Training Results
 
-Nine training runs were conducted, totaling ~4,000 iterations and 736,000 games:
+Ten training runs were conducted, totaling ~4,500 iterations and 768,000 games:
 
 | Run | Iterations | Games/iter | vs Random | vs BEN | Key result |
 |-----|-----------|------------|-----------|--------|------------|
@@ -31,8 +31,9 @@ Nine training runs were conducted, totaling ~4,000 iterations and 736,000 games:
 | 7   | 1000      | 256        | +3.4 IMP  | **-5.2** | Resumed from run 6. Held steady at +3.4 avg advantage over 1,000 iters. **Best vs BEN.** Second plateau confirmed. Details below. |
 | 8   | 1000      | 256        | +1.1 IMP  | -8.4   | **Card play pre-training added.** Fresh start with both bidding + card play supervised data. Did not beat run 7. Details below. |
 | 9   | 500       | 64         | +4.6 IMP  | -6.6   | **Train against BEN as EW opponent.** Resumed from run 7. No improvement vs BEN despite direct exposure. Details below. |
+| 10  | 500       | 64         | +4.7 IMP  | -7.2   | **BEN opponent + relaxed KL (0.10).** Full PPO epochs completed, but extra gradient didn't help vs BEN. Details below. |
 
-The model clearly learns in the first 500 iterations: value predictions improve dramatically (vloss 267 to 34), entropy declines naturally (1.05 to 0.71), and the model starts beating PAR by ~1.5 IMPs/game. But the second 500 iterations (run 5) show no further progress — all metrics flatline. Run 6 applied four targeted fixes and broke through the plateau. Run 7 confirmed a new plateau at ~+3.4 IMP. Run 8 tested card play pre-training but did not improve over run 7. Run 9 trained against BEN as the opponent but did not close the gap.
+The model clearly learns in the first 500 iterations: value predictions improve dramatically (vloss 267 to 34), entropy declines naturally (1.05 to 0.71), and the model starts beating PAR by ~1.5 IMPs/game. But the second 500 iterations (run 5) show no further progress — all metrics flatline. Run 6 applied four targeted fixes and broke through the plateau. Run 7 confirmed a new plateau at ~+3.4 IMP. Run 8 tested card play pre-training but did not improve over run 7. Runs 9-10 trained against BEN as the opponent — with tight and relaxed KL thresholds respectively — but neither closed the gap.
 
 ### Run 6: Breaking the Plateau
 
@@ -243,6 +244,46 @@ Run 9 tested the hypothesis that self-play co-adaptation was the key bottleneck.
 - **Fewer training steps per iteration.** Sequential play with 64 games produced ~2,150 NS-only steps/iter (vs ~15,000+ steps from 256 batched games in run 7). Combined with KL early stopping, each iteration delivered very little gradient signal — often just 1-3 mini-batches of 256 steps.
 - **The bottleneck is likely not the opponent.** Simply facing a stronger opponent doesn't help if the model can't make large enough policy updates to adapt. The combination of tight KL threshold + small batch count + hardened policy means the training loop effectively stalls regardless of who the opponent is.
 
+### Run 10: Relaxed KL + BEN Opponent — Still No Improvement
+
+Run 10 tested whether the KL early stopping identified in run 9 was the binding constraint. Same setup as run 9 (BEN as EW, 64 games/iter, resumed from run 7) but with target_kl raised from 0.05 to 0.10. This successfully unblocked PPO — every iteration completed full 2/2 epochs with 18 mini-batches, versus run 9's 1-3 batches. But the extra gradient signal did not translate to better performance against BEN.
+
+**Eval progression** (50 games each checkpoint):
+
+| Iteration | vs Random (advantage) | vs BEN (IMP/deal) |
+|-----------|----------------------|-------------------|
+| 49        | +3.9                 | -7.72             |
+| 99        | +4.1                 | -7.76             |
+| 149       | +6.3                 | -6.56             |
+| 199       | +4.8                 | -8.12             |
+| 249       | +5.6                 | **-6.26**         |
+| 299       | +3.9                 | -7.12             |
+| 349       | +4.0                 | -7.18             |
+| 399       | +5.1                 | -7.28             |
+| 449       | +4.7                 | -7.12             |
+| 499       | +5.0                 | -6.92             |
+
+**Key metrics:**
+
+| Metric | Run 9 (KL=0.05) | Run 10 (KL=0.10) | Change |
+|--------|-----------------|-------------------|--------|
+| Avg advantage vs random | +4.6 IMP | +4.7 IMP | Same |
+| Avg vs BEN | -6.6 IMP | -7.2 IMP | **Slightly worse** |
+| Best vs BEN | -5.30 | -6.26 | Worse |
+| PPO epochs per iter | 1/2 (early stop) | 2/2 (full) | More updates |
+| PPO batches per iter | 1-3 | 18 | **6-18x more** |
+| Entropy (final) | 0.46 | 0.44 | Similar |
+| Total training time | ~3.9h | ~4.0h | Similar |
+
+**Observations:**
+
+- **Relaxing KL successfully unblocked PPO updates** — every iteration completed full 2/2 epochs with 18 batches (vs run 9's 1-3 batches). The model received 6-18x more gradient signal per iteration.
+- **The extra gradient did not help.** vs-BEN averaged -7.2 IMP/deal, slightly worse than run 9's -6.6. More gradient signal in the wrong direction just moves the policy further from where it needs to be.
+- **KL early stopping was not the binding constraint.** Run 9 hypothesized KL was the bottleneck; run 10 disproved this. The policy can update freely but doesn't learn to play better against BEN.
+- **The IMP-vs-PAR reward is the likely issue.** The model optimizes for absolute quality (beating PAR), not for beating BEN specifically. PAR-optimal play may differ from BEN-beating play — e.g., aggressive bidding might beat PAR but lose to BEN's competent defense. The reward signal doesn't contain information about BEN's tendencies.
+- **Model capacity may be insufficient.** With 5.1M parameters handling all positions, phases, and strains, the model may lack the capacity to learn both "play well generally" and "exploit BEN's patterns." BEN uses 8+ specialized models with likely more total parameters.
+- **vs Random remained stable** (+4.7 avg), confirming the model doesn't degrade — it just can't improve against a competent opponent through RL alone with the current architecture and reward signal.
+
 ### Evaluation Against BEN
 
 To get a meaningful skill measurement beyond random, we evaluated our models against BEN's pre-trained neural networks (pure NN-only, no search/DDS/PIMC/BBA). Each deal is played twice — our model as NS with BEN as EW, then reversed — giving a paired IMP comparison.
@@ -256,12 +297,13 @@ To get a meaningful skill measurement beyond random, we evaluated our models aga
 | 7   | iter 999  | +3.4      | **-5.18**         | [-8.2, -2.2]  | 15.3 | 100 |
 | 8   | iter 999  | +1.1      | **-8.40**         | [-9.7, -7.2]  | 4.5 | 50 |
 | 9   | iter 499  | +4.6      | **-6.63**         | —             | —   | 50 (avg of 10 evals) |
+| 10  | iter 499  | +4.7      | **-7.20**         | —             | —   | 50 (avg of 10 evals) |
 
 **Observations:**
 
 - **All models lose to BEN's NNs by 4-8 IMPs/deal.** BEN's supervised NNs (trained on 8,730+ GIB-BBO games with specialized models for each position — lefty, dummy, righty, declarer for both NT and suit contracts) have a substantial edge over our single 5.1M-parameter transformer.
 - **Run 7 is the strongest against BEN** (-5.18 IMP/deal), consistent with its status as the best model overall. The 1,000 extra iterations of RL self-play after supervised pre-training produced the most robust policy.
-- **Run 9 (trained against BEN) did not improve over run 7** (-6.63 avg vs -5.18). Despite 500 iterations of direct BEN exposure, the model couldn't adapt — the combination of tight KL threshold, small step counts from sequential play, and a hardened policy prevented meaningful learning. Simply changing the opponent is insufficient without also addressing the training dynamics.
+- **Runs 9-10 (trained against BEN) did not improve over run 7.** Run 9 (-6.63, KL=0.05) and run 10 (-7.20, KL=0.10) both performed worse than run 7's -5.18 despite direct BEN exposure. Run 10 disproved the KL hypothesis — full PPO epochs with 6-18x more gradient signal per iteration still didn't help. The bottleneck is not opponent quality or training dynamics, but likely the reward signal (IMP-vs-PAR doesn't optimize for beating BEN) and model capacity (5.1M params for all positions/phases).
 - **Run 8 performed worst** (-8.40) with remarkably low variance (std=4.5 vs 14-20 for others). Raw scores were tiny (mean ~220 points), suggesting many low-level contracts or near-passouts. The card play pre-training with insufficient data appears to have disrupted bidding quality.
 - **Run 4 (no pre-training) had the widest CI** — its 95% CI includes 0, meaning it's not statistically distinguishable from BEN with 50 games. The high variance comes from erratic bidding producing wild score swings in both directions.
 - **Performance vs random doesn't predict performance vs BEN.** Run 6 (+3.6 vs random) scored worse against BEN (-7.46) than run 7 (+3.4 vs random, -5.18 vs BEN). Strategies that exploit random's weaknesses don't transfer to exploiting a competent opponent.
@@ -287,13 +329,13 @@ To get a meaningful skill measurement beyond random, we evaluated our models aga
 
 **5 IMP gap vs BEN.** Our best model (run 7) loses to BEN's pure NNs by -5.18 IMP/deal. The gap comes from three structural disadvantages: (1) one generalist model vs BEN's 8+ specialized models, (2) self-play co-adaptation producing strategies that don't transfer to competent opponents, (3) card play learned entirely from self-play with no expert supervision. The BEN evaluation (see above) also revealed that performance vs random doesn't predict performance vs BEN — run 6 was better vs random but worse vs BEN than run 7.
 
-**Self-play co-adaptation was not the key bottleneck.** Run 9 trained directly against BEN's NNs and showed no improvement vs BEN (-6.6 IMP vs run 7's -5.18). The real bottleneck appears to be the training dynamics: PPO's KL early stopping triggers after 1-3 mini-batches, the policy has hardened, and sequential play yields only ~2,150 steps/iter (vs ~15K batched). The model can't make large enough policy updates to adapt, regardless of opponent quality.
+**RL fine-tuning against BEN doesn't work with the current setup.** Run 9 (BEN opponent, KL=0.05) and run 10 (BEN opponent, KL=0.10) both failed to improve vs BEN. Run 10 disproved the KL hypothesis — full PPO epochs with 18 batches/iter still didn't help. The model receives gradient signal but it doesn't point toward beating BEN. The IMP-vs-PAR reward optimizes for absolute quality, not relative advantage over a specific opponent. And with 5.1M parameters handling all positions/phases/strains, the model may lack capacity to learn opponent-specific adaptations on top of general play.
 
 **No position specialization.** BEN uses 8 separate card play models (lefty/dummy/righty/declarer × NT/suit), each specialized for its role. Our single transformer uses identical weights for all positions. Declarer play (planning how to take tricks) and defensive play (inferring partner's signals, finding the killing defense) are fundamentally different skills that benefit from specialization.
 
 **Card play data gap.** Our model learned card play entirely from RL self-play (run 7) or from 15K insufficient examples (run 8). BEN's card play models were trained on far more supervised expert data. Distilling from BEN's own play could generate unlimited card play training data without external acquisition.
 
-**KL early stopping limits late-stage learning.** In runs 6, 7, and 9, late iterations triggered KL early stopping after just 1-3 mini-batches. The policy has hardened and small updates push past the KL threshold immediately. This effectively freezes the policy in later training. Run 9 confirmed this is the binding constraint — even with a qualitatively different opponent (BEN), the KL threshold prevented the large policy updates needed to adapt.
+**KL early stopping is not the binding constraint.** Run 9 hypothesized that KL early stopping was the bottleneck. Run 10 disproved this — raising KL from 0.05 to 0.10 allowed full PPO epochs (18 batches vs 1-3), but performance vs BEN was unchanged or slightly worse. The extra gradient signal doesn't help because the reward signal (IMP-vs-PAR) doesn't contain information about how to beat BEN specifically.
 
 **No experiment tracking.** Training metrics are only available in log files. There's no WandB, TensorBoard, or equivalent for visualizing learning curves, comparing runs, or detecting anomalies early.
 
@@ -319,7 +361,7 @@ To get a meaningful skill measurement beyond random, we evaluated our models aga
 
 ### High Priority — Close the Gap Against BEN
 
-Runs 7-9 revealed that the gap isn't primarily about opponent quality or co-adaptation — run 9 trained directly against BEN and saw no improvement. The binding constraints appear to be: (1) KL early stopping freezes the policy before meaningful adaptation occurs, (2) one generalist 5.1M-param model vs BEN's suite of specialized models, (3) card play was learned entirely from self-play with no expert supervision. The strategies below are re-prioritized based on run 9's findings.
+Runs 9-10 systematically eliminated two hypotheses: run 9 showed that training against BEN (vs self-play) doesn't help; run 10 showed that relaxing KL early stopping doesn't help either. The model gets more/better gradient signal but it doesn't point toward beating BEN. The remaining hypotheses are: (1) IMP-vs-PAR reward doesn't optimize for beating a specific opponent, (2) 5.1M-param generalist model lacks capacity for both general play and opponent-specific adaptation, (3) card play was learned entirely from self-play with no expert supervision. The strategies below are re-prioritized based on runs 9-10's findings.
 
 ~~**7. Train against BEN instead of self-play.**~~ Done in run 9. BEN's NNs used as EW opponents during RL training, resumed from run 7. The model maintained vs-random performance (+4.6 IMP) but did not improve against BEN (-6.6 avg vs run 7's -5.18). The bottleneck was not the opponent — PPO's KL early stopping triggered after 1-3 mini-batches nearly every iteration, preventing the large policy updates needed to adapt. Combined with fewer training steps (64 sequential games vs 256 batched), each iteration delivered minimal gradient signal.
 
@@ -333,9 +375,9 @@ Runs 7-9 revealed that the gap isn't primarily about opponent quality or co-adap
 
 **11. Increase model capacity.** The current 5.1M parameter model (d_model=256, 6 layers) may not have enough capacity for bridge's complexity. Try d_model=512, n_layers=8 (~20M params). BEN's collective model suite (bidding LSTM + 8 card play NNs + lead models) likely exceeds this in total parameters, and each component is specialized. A larger backbone could better support position-conditional heads (item 9).
 
-**12. Reward shaping with BEN reference scores.** Instead of IMP-vs-PAR (which measures absolute quality), use IMP-vs-BEN as the training reward. For each deal, play it with BEN to get a reference score, then reward our model for beating BEN's result. This directly optimizes for closing the gap and provides a more informative gradient — the model learns not just "play well" but "play better than BEN on this deal."
+**12. Reward shaping with BEN reference scores.** Runs 9-10 showed that IMP-vs-PAR reward doesn't help beat BEN — the model improves its absolute play quality but not its relative performance against BEN. Instead, use IMP-vs-BEN as the training reward: for each deal, play it with BEN to get a reference score, then reward our model for beating BEN's result. This directly optimizes for closing the gap. Now **high priority** given the run 9-10 diagnosis — the reward signal is likely the key bottleneck.
 
-**13. Disable or further raise KL threshold.** Runs 6, 7, and 9 all show late-stage KL early stopping after just 1-3 mini-batches. Run 9 confirmed this is the binding constraint — training against BEN couldn't improve because policy updates were too small. Try 0.10 or disable entirely (`--target-kl 0`). This is now the **highest priority** — no opponent change or architectural improvement will help if the training loop can't update the policy. Should be combined with re-running BEN opponent training (item 7) to test whether relaxed KL + BEN opponent together break the plateau.
+~~**13. Raise KL threshold.**~~ Done in run 10. Raised from 0.05 to 0.10. PPO completed full 2/2 epochs (18 batches/iter vs 1-3 in run 9), but extra gradient signal did not improve vs BEN (-7.2 vs run 9's -6.6). **KL was not the binding constraint** — the reward signal and model capacity are the more likely bottlenecks.
 
 **14. Add experiment tracking.** Integrate WandB or TensorBoard to log training metrics, eval results, and hyperparameters. With BEN evaluation now providing a meaningful metric, tracking IMP-vs-BEN across training iterations becomes essential for diagnosing whether changes are working.
 
@@ -355,8 +397,8 @@ After runs 4-5 plateaued at +1 IMP, run 6 applied four targeted fixes — superv
 
 Run 8 tested card play pre-training from BBO PBN files (~15K card play examples), but starting from scratch with insufficient data actually performed worse (+1.1 IMP avg). The card play pipeline works — it just needs 10-100x more supervised data to be effective.
 
-Run 9 tested the hypothesis that self-play co-adaptation was the key bottleneck by training directly against BEN's NNs as the EW opponent. Despite 500 iterations of direct BEN exposure, the model did not improve against BEN (-6.6 IMP/deal avg, vs run 7's -5.18 baseline). The vs-random advantage was maintained (+4.6 IMP), but the model couldn't adapt to BEN because PPO's KL early stopping triggered after 1-3 mini-batches nearly every iteration, preventing meaningful policy updates.
+Runs 9-10 systematically tested training against BEN as the EW opponent. Run 9 (KL=0.05) saw PPO early-stop after 1-3 batches, averaging -6.6 IMP/deal vs BEN. Run 10 (KL=0.10) successfully unblocked PPO — full 2/2 epochs, 18 batches/iter — but still averaged -7.2 IMP/deal vs BEN. Neither improved over run 7's -5.18 baseline. This eliminated two hypotheses: the bottleneck is neither the opponent (self-play vs BEN) nor the KL threshold. The model receives gradient signal but IMP-vs-PAR doesn't contain information about how to beat BEN specifically.
 
-Evaluation against BEN's pre-trained neural networks (pure NN, no search) gives a meaningful skill measurement: our best model (run 7) loses by **-5.18 IMP/deal** (95% CI: [-8.2, -2.2]). All models lose by 4-8 IMPs. BEN's supervised NNs, trained on 8,730+ expert games with 8 specialized position models, have a substantial edge over our single 5.1M-parameter transformer trained via RL self-play. The gap is significant but not enormous — roughly the difference between an intermediate and advanced player.
+Evaluation against BEN's pre-trained neural networks (pure NN, no search) gives a meaningful skill measurement: our best model (run 7) loses by **-5.18 IMP/deal** (95% CI: [-8.2, -2.2]). All models lose by 5-8 IMPs. BEN's supervised NNs, trained on 8,730+ expert games with 8 specialized position models, have a substantial edge over our single 5.1M-parameter transformer trained via RL self-play. The gap is significant but not enormous — roughly the difference between an intermediate and advanced player.
 
-The highest-impact next steps are: (1) relaxing or disabling KL early stopping — run 9 confirmed this is the binding constraint that prevents adaptation regardless of opponent quality; (2) re-running BEN opponent training with relaxed KL to test whether the combination breaks the plateau; (3) distilling from BEN's play to generate unlimited supervised card play data; (4) adding position-conditional card play heads to match BEN's architectural specialization.
+The highest-impact next steps are: (1) reward shaping with BEN reference scores (IMP-vs-BEN instead of IMP-vs-PAR) — runs 9-10 showed the reward signal is the likely bottleneck; (2) distilling from BEN's play to generate unlimited supervised card play data; (3) adding position-conditional card play heads to match BEN's architectural specialization; (4) increasing model capacity to support richer representations.
