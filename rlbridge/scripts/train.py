@@ -71,6 +71,15 @@ def parse_args():
     parser.add_argument('--pretrain-batch-size', type=int, default=64,
                         help='Batch size for pre-training')
 
+    # BEN distillation data
+    parser.add_argument('--distill-data', type=str, default=None,
+                        help='Path to pickle of (obs, action, is_bid) from distill_ben.py')
+
+    # Reward mode
+    parser.add_argument('--reward-mode', type=str, default='par',
+                        choices=['par', 'ben'],
+                        help='Reward signal: par (DDS PAR) or ben (BEN self-play reference)')
+
     return parser.parse_args()
 
 
@@ -110,7 +119,12 @@ def main():
     )
     if args.device is not None:
         tc_kwargs['device'] = args.device
+    tc_kwargs['reward_mode'] = args.reward_mode
     training_config = TrainingConfig(**tc_kwargs)
+
+    if args.reward_mode == 'ben' and not args.ben_opponent:
+        parser = None  # already parsed, just raise
+        raise SystemExit("ERROR: --reward-mode ben requires --ben-opponent")
 
     # Load BEN models if training against BEN
     ben_models = None
@@ -187,6 +201,48 @@ def main():
             logging.info("=== Pre-Training Complete ===")
         else:
             logging.warning("No valid examples generated, skipping pre-training")
+
+    # Distill pre-training from BEN self-play data (only if not resuming)
+    if args.distill_data and not args.resume:
+        import pickle
+        from torch.utils.data import DataLoader
+        from rlbridge.training.pretrain_data import PretrainDataset, make_collate_fn
+        from rlbridge.training.supervised import SupervisedTrainer
+
+        logging.info("=== Distill Pre-Training ===")
+        with open(args.distill_data, 'rb') as f:
+            examples = pickle.load(f)
+
+        bid_count = sum(1 for _, _, ib in examples if ib)
+        card_count = len(examples) - bid_count
+        logging.info(f"Loaded {len(examples)} examples: {bid_count} bidding, {card_count} card play")
+
+        if examples:
+            dataset = PretrainDataset(examples, model_config)
+            collate_fn = make_collate_fn(model_config)
+            dataloader = DataLoader(
+                dataset,
+                batch_size=args.pretrain_batch_size,
+                shuffle=True,
+                collate_fn=collate_fn,
+                num_workers=0,
+            )
+
+            device = training_config.device
+            sup_trainer = SupervisedTrainer(
+                trainer.model, lr=args.pretrain_lr, device=device,
+            )
+
+            for epoch in range(args.pretrain_epochs):
+                metrics = sup_trainer.train_epoch(dataloader)
+                logging.info(
+                    f"Distill epoch {epoch + 1}/{args.pretrain_epochs}: "
+                    f"loss={metrics['loss']:.4f} accuracy={metrics['accuracy']:.4f}"
+                )
+
+            logging.info("=== Distill Pre-Training Complete ===")
+        else:
+            logging.warning("No examples in distill data, skipping")
 
     trainer.run()
 

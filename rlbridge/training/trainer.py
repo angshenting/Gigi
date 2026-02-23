@@ -55,9 +55,10 @@ class SelfPlayTrainer:
             results = self._self_play()
             t_play = time.time() - t1
 
-            # 2. Compute PAR for each deal
+            # 2. Compute PAR for each deal (skip when using BEN reference scores)
             t1 = time.time()
-            self._compute_pars(results)
+            if self.training_config.reward_mode != 'ben':
+                self._compute_pars(results)
             t_par = time.time() - t1
 
             # 3. Process trajectories
@@ -125,12 +126,18 @@ class SelfPlayTrainer:
         return results
 
     def _self_play_vs_ben(self) -> list:
-        """Run games with NN as NS and BEN as EW (sequential)."""
+        """Run games with NN as NS and BEN as EW (sequential).
+
+        When reward_mode='ben', also plays a BEN-vs-BEN reference game on the
+        same deal and sets result.par_ns = ref_score_ns (so downstream reward
+        computation measures IMP gain vs BEN instead of vs DDS PAR).
+        """
         from rlbridge.engine.ben_agent import BenAgent
 
         self.model.eval()
         temperature = compute_temperature(self.training_config, self.iteration)
         n_games = self.training_config.games_per_iteration
+        use_ben_reward = self.training_config.reward_mode == 'ben'
         results = []
 
         for i in range(n_games):
@@ -145,9 +152,21 @@ class SelfPlayTrainer:
             ]
             try:
                 result = Game(agents, deal).play()
-                results.append(result)
             except Exception as e:
                 logger.debug(f"BEN game {i} failed: {e}")
+                continue
+
+            if use_ben_reward:
+                # Play BEN-vs-BEN reference on same deal
+                ref_agents = [BenAgent(self.ben_models, deal) for _ in range(4)]
+                try:
+                    ref_result = Game(ref_agents, deal).play()
+                    result.par_ns = ref_result.score_ns
+                except Exception as e:
+                    logger.debug(f"BEN reference game {i} failed: {e}")
+                    continue  # skip deal entirely if reference fails
+
+            results.append(result)
 
         if len(results) < n_games:
             logger.info(f"BEN self-play: {len(results)}/{n_games} games succeeded")

@@ -48,6 +48,9 @@ class TrainingConfig:
     # Reward
     gamma: float = 1.0  # single terminal reward, no discounting
 
+    # Reward mode: 'par' (DDS PAR) or 'ben' (BEN self-play reference)
+    reward_mode: str = 'par'
+
     # Device (auto-detects CUDA)
     device: str = field(default_factory=_default_device)
 
