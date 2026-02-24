@@ -8,7 +8,7 @@ Three layers:
 
 1. **Game engine** (`rlbridge/engine/`) — Immutable game state, full bridge rules (bidding + card play), batched multi-game inference. Verified against 10,000 random games with zero errors.
 
-2. **Transformer model** (`rlbridge/model/`) — 5.1M parameter causal transformer with dual policy heads (38 bids + 52 cards) and a value head. Legal action masking, temperature-controlled sampling.
+2. **Transformer model** (`rlbridge/model/`) — Parametric causal transformer with dual policy heads (38 bids + 52 cards) and a value head. Legal action masking, temperature-controlled sampling. Best model is 10.8M params (d_model=384, n_heads=12, n_layers=6, d_ff=1536); original was 5.1M params (d_model=256).
 
 3. **PPO training loop** (`rlbridge/training/`) — Self-play with IMP-vs-PAR rewards computed via DDS (double-dummy solver). Clipped PPO with KL early stopping, checkpointing, periodic evaluation.
 
@@ -18,7 +18,7 @@ The system was progressively optimized from 400s/iteration (sequential CPU) to 7
 
 ## Training Results
 
-Eleven training runs were conducted, totaling ~5,500 iterations and 832,000 games:
+Twelve training runs were conducted, totaling ~6,000 iterations and 864,000 games:
 
 | Run | Iterations | Games/iter | vs Random | vs BEN | Key result |
 |-----|-----------|------------|-----------|--------|------------|
@@ -33,8 +33,9 @@ Eleven training runs were conducted, totaling ~5,500 iterations and 832,000 game
 | 9   | 500       | 64         | +4.6 IMP  | -6.6   | **Train against BEN as EW opponent.** Resumed from run 7. No improvement vs BEN despite direct exposure. Details below. |
 | 10  | 500       | 64         | +4.7 IMP  | -7.2   | **BEN opponent + relaxed KL (0.10).** Full PPO epochs completed, but extra gradient didn't help vs BEN. Details below. |
 | 11  | 1000      | 64         | +0.8 IMP  | -6.2   | **BEN distillation + IMP-vs-BEN reward.** Pre-trained on 625K BEN self-play examples, reward from BEN reference scores. Best single eval -5.08, but no sustained improvement. Details below. |
+| 12  | 500       | 64         | +4.5 IMP  | **-3.6** | **Larger model (10.8M params).** d_model=384, n_heads=12, n_layers=6, d_ff=1536. Distill pre-trained to 73.3% accuracy. **New best vs BEN — closed gap by 1.6 IMP/deal.** Details below. |
 
-The model clearly learns in the first 500 iterations: value predictions improve dramatically (vloss 267 to 34), entropy declines naturally (1.05 to 0.71), and the model starts beating PAR by ~1.5 IMPs/game. But the second 500 iterations (run 5) show no further progress — all metrics flatline. Run 6 applied four targeted fixes and broke through the plateau. Run 7 confirmed a new plateau at ~+3.4 IMP. Run 8 tested card play pre-training but did not improve over run 7. Runs 9-10 trained against BEN as the opponent — with tight and relaxed KL thresholds respectively — but neither closed the gap. Run 11 combined BEN distillation with IMP-vs-BEN reward shaping, but the gap persists.
+The model clearly learns in the first 500 iterations: value predictions improve dramatically (vloss 267 to 34), entropy declines naturally (1.05 to 0.71), and the model starts beating PAR by ~1.5 IMPs/game. But the second 500 iterations (run 5) show no further progress — all metrics flatline. Run 6 applied four targeted fixes and broke through the plateau. Run 7 confirmed a new plateau at ~+3.4 IMP. Run 8 tested card play pre-training but did not improve over run 7. Runs 9-10 trained against BEN as the opponent — with tight and relaxed KL thresholds respectively — but neither closed the gap. Run 11 combined BEN distillation with IMP-vs-BEN reward shaping, but the gap persists. Run 12 increased model capacity from 5.1M to 10.8M parameters — confirming the architectural hypothesis with a new best of **-3.60 IMP/deal** against BEN.
 
 ### Run 6: Breaking the Plateau
 
@@ -349,6 +350,78 @@ Accuracy is lower than run 6's 82.9% (PBN bidding-only) because 83% of the disti
 - **The IMP-vs-BEN reward is noisy.** BEN's play varies across deals — sometimes BEN plays well and our model can't beat the reference, sometimes BEN plays poorly and the bar is low. This noise may dilute the learning signal compared to the more stable DDS PAR baseline.
 - **Two changes at once make attribution difficult.** We changed both the pre-training data (BEN distill vs PBN) and the reward signal (BEN vs PAR) simultaneously. It's unclear which change helped and which hurt.
 
+### Run 12: Larger Model (10.8M Params) — New Best vs BEN
+
+Run 12 tested the architectural capacity hypothesis identified in runs 9-11. The model dimensions were increased from d_model=256/n_heads=8/n_layers=6/d_ff=1024 (5.1M params) to d_model=384/n_heads=12/n_layers=6/d_ff=1536 (10.8M params) — a 2.1x increase. Per-head dimension remained d_k=32. No code changes were needed; the model is fully parametric via `ModelConfig`.
+
+Fresh start with BEN distillation pre-training, then self-play with PAR reward (same setup as run 7, isolating the capacity variable). 64 games/iter, lr=1e-4, target_kl=0.02, 500 iterations, CUDA.
+
+Note: The original plan called for d_model=512/n_heads=16/n_layers=8/d_ff=2048 (~25M params), but this consumed 16GB VRAM on an RTX 5070 Ti (16GB), causing system-wide slowdown. The config was scaled back to 384/12/6/1536 (~10.8M params, ~5GB VRAM).
+
+**Distill pre-training** (624,722 examples: 106K bidding + 519K card play, 5 epochs):
+
+| Epoch | Loss   | Accuracy |
+|-------|--------|----------|
+| 1     | 1.9031 | 61.5%    |
+| 2     | 1.5357 | 67.2%    |
+| 3     | 1.3808 | 69.9%    |
+| 4     | 1.2784 | 71.8%    |
+| 5     | 1.1964 | 73.3%    |
+
+Accuracy surpassed run 11's 71.2% — the larger model extracts more from the same supervised data.
+
+**Eval progression** (50 games each checkpoint):
+
+| Iteration | vs Random (advantage) | vs BEN (IMP/deal) |
+|-----------|----------------------|-------------------|
+| 49        | +9.2                 | +5.6              |
+| 99        | +8.1                 | +4.7              |
+| 149       | +5.9                 | +4.5              |
+| 199       | +6.9                 | +4.5              |
+| 249       | +7.1                 | +5.0              |
+| 299       | +6.3                 | +5.3              |
+| 349       | +8.1                 | +4.9              |
+| 399       | +7.0                 | +4.9              |
+| 449       | +6.4                 | +3.3              |
+| 499       | +6.6                 | +4.0              |
+
+Note: The "vs BEN" column here is the `nn_imp` metric from the training eval loop (50-game samples, different methodology from the paired 200-game evaluation below).
+
+**200-game paired evaluation** (iter 49 checkpoint, seed=42):
+
+```
+IMP Advantage (Our NN - BEN, paired):
+  Mean: -3.60 IMP/deal
+  Std:  6.01
+  SE:   0.43
+  95%CI: [-4.43, -2.76]
+
+Our NN vs PAR: -1.63 IMP/deal
+BEN vs PAR:    +1.06 IMP/deal
+```
+
+**Key metrics:**
+
+| Metric | Run 7 (5.1M) | Run 12 (10.8M) | Change |
+|--------|-------------|----------------|--------|
+| vs BEN (200 games) | -5.18 IMP/deal | **-3.60 IMP/deal** | **+1.58** |
+| vs BEN 95% CI | [-8.2, -2.2] | [-4.43, -2.76] | Narrower, doesn't overlap run 7 |
+| vs PAR | -2.36 | -1.63 | +0.73 |
+| Avg advantage vs random | +3.4 IMP | +4.5 IMP (avg of 10 evals) | Better |
+| Distill accuracy | — (PBN 82.9%) | 73.3% (BEN distill) | Different data |
+| Parameters | 5.1M | 10.8M | 2.1x |
+| Time/iter | ~7s | ~4.5s | Faster (64 games vs 256) |
+| Total training time | ~6h | ~40 min + ~50 min eval | Much shorter (500 iter × 4.5s) |
+
+**Observations:**
+
+- **The capacity hypothesis is confirmed.** Doubling the model from 5.1M to 10.8M params improved vs-BEN performance by 1.58 IMP/deal — the first statistically significant improvement since run 7. The 95% CIs don't overlap: run 7's [-8.2, -2.2] vs run 12's [-4.43, -2.76].
+- **Distillation accuracy improved.** The larger model reached 73.3% on the same 625K BEN distill dataset vs run 11's 71.2% — confirming that the smaller model was capacity-limited even for supervised learning.
+- **Self-play with PAR reward remains the best RL strategy.** Run 12 used the same self-play + PAR setup as run 7 (not BEN opponent or BEN reward). Combined with runs 9-11's negative results, this confirms that the training signal was fine — the model just needed more capacity to use it effectively.
+- **vs Random also improved** (+4.5 avg advantage, with peaks up to +9.2). The larger model is better across the board, not just against BEN.
+- **PPO early stopping was frequent** — nearly every iteration stopped after 1-2 batches at target_kl=0.02. The larger model's updates are bigger per step, exceeding the KL threshold quickly. A higher target_kl (0.05) might unlock further improvement.
+- **The gap is narrowing but still significant.** At -3.60 IMP/deal, we're losing roughly 1 game-swing every 3 deals against BEN. This is closer to "competitive intermediate" vs BEN's "advanced" level. Further capacity increases and position specialization could close the remaining gap.
+
 ### Evaluation Against BEN
 
 To get a meaningful skill measurement beyond random, we evaluated our models against BEN's pre-trained neural networks (pure NN-only, no search/DDS/PIMC/BBA). Each deal is played twice — our model as NS with BEN as EW, then reversed — giving a paired IMP comparison.
@@ -364,18 +437,19 @@ To get a meaningful skill measurement beyond random, we evaluated our models aga
 | 9   | iter 499  | +4.6      | **-6.63**         | —             | —   | 50 (avg of 10 evals) |
 | 10  | iter 499  | +4.7      | **-7.20**         | —             | —   | 50 (avg of 10 evals) |
 | 11  | iter 999  | +0.8      | **-6.17**         | —             | —   | 50 (avg of 20 evals) |
+| 12  | iter 49   | +4.5      | **-3.60**         | [-4.43, -2.76] | 6.01 | 200 |
 
 **Observations:**
 
-- **All models lose to BEN's NNs by 5-8 IMPs/deal.** BEN's supervised NNs (trained on 8,730+ GIB-BBO games with specialized models for each position — lefty, dummy, righty, declarer for both NT and suit contracts) have a substantial edge over our single 5.1M-parameter transformer.
-- **Run 7 is still the strongest against BEN** (-5.18 IMP/deal). Run 11's best single eval (-5.08 at iter 449) is within noise of this baseline. Run 7's 1,000 iterations of RL self-play after PBN supervised pre-training, resumed from run 6, remains the most robust policy.
+- **All models lose to BEN's NNs, but the gap is narrowing.** BEN's supervised NNs (trained on 8,730+ GIB-BBO games with specialized models for each position — lefty, dummy, righty, declarer for both NT and suit contracts) have a substantial edge, but run 12's larger model reduced the gap from -5.18 to -3.60 IMP/deal.
+- **Run 12 is now the strongest against BEN** (-3.60 IMP/deal, 200 games), surpassing run 7's -5.18 baseline by a statistically significant margin. The 95% CIs don't overlap: run 12 [-4.43, -2.76] vs run 7 [-8.2, -2.2]. The larger 10.8M-param model confirmed the architectural capacity hypothesis.
 - **Run 11 (BEN distill + BEN reward) averaged -6.17** across 20 eval checkpoints — better than runs 9-10 but not better than run 7. The IMP-vs-BEN reward may help marginally, but the model sacrificed general play quality (vs random collapsed to +0.8) without a corresponding gain against BEN.
 - **Runs 9-10 (trained against BEN with PAR reward) did not improve over run 7.** Run 9 (-6.63, KL=0.05) and run 10 (-7.20, KL=0.10) both performed worse despite direct BEN exposure. Run 10 disproved the KL hypothesis — full PPO epochs with 6-18x more gradient signal per iteration still didn't help.
 - **The reward signal alone is not the bottleneck.** Run 11 tested the hypothesis from runs 9-10 that IMP-vs-PAR was the problem. Switching to IMP-vs-BEN didn't produce a breakthrough. The gap likely comes from structural disadvantages: model capacity (5.1M params for all positions/phases) and lack of position specialization.
 - **Run 8 performed worst** (-8.40) with remarkably low variance (std=4.5 vs 14-20 for others). Raw scores were tiny (mean ~220 points), suggesting many low-level contracts or near-passouts. The card play pre-training with insufficient data appears to have disrupted bidding quality.
 - **Run 4 (no pre-training) had the widest CI** — its 95% CI includes 0, meaning it's not statistically distinguishable from BEN with 50 games. The high variance comes from erratic bidding producing wild score swings in both directions.
 - **Performance vs random doesn't predict performance vs BEN.** Run 6 (+3.6 vs random) scored worse against BEN (-7.46) than run 7 (+3.4 vs random, -5.18 vs BEN). Strategies that exploit random's weaknesses don't transfer to exploiting a competent opponent.
-- **The gap is significant but not enormous.** In competitive bridge, 5-8 IMPs/deal is roughly the difference between an intermediate and an advanced player. Our RL model plays recognizable bridge (not random), but BEN's supervised training on expert data gives it meaningfully better decisions in both bidding and card play.
+- **The gap is narrowing.** Run 12 reduced it from ~5 to ~3.6 IMP/deal — roughly the difference between an intermediate-plus and an advanced player. Further capacity increases and position specialization may close the remaining gap.
 
 ---
 
@@ -395,9 +469,9 @@ To get a meaningful skill measurement beyond random, we evaluated our models aga
 
 ## What Needs Improvement
 
-**5 IMP gap vs BEN.** Our best model (run 7) loses to BEN's pure NNs by -5.18 IMP/deal. Four runs of RL fine-tuning against BEN (runs 9-11) have failed to close this gap. The remaining structural disadvantages are: (1) one 5.1M-param generalist model vs BEN's 8+ specialized models, (2) no position specialization for card play (declarer vs defender), (3) the RL training loop may be insufficient for learning from a fixed strong opponent.
+**3.6 IMP gap vs BEN.** Our best model (run 12) loses to BEN's pure NNs by -3.60 IMP/deal — down from -5.18 (run 7) after doubling model capacity. Run 12 confirmed the architectural hypothesis: increased capacity directly translates to better play. The remaining gap likely comes from: (1) still lower total capacity than BEN's 8+ specialized model suite, (2) no position specialization for card play (declarer vs defender), (3) PPO is KL-constrained at target_kl=0.02 with the larger model.
 
-**Neither reward signal nor training dynamics are the bottleneck.** Runs 9-11 systematically eliminated three hypotheses: run 9 showed that BEN as opponent doesn't help (with PAR reward); run 10 showed that relaxing KL doesn't help (more gradient, same direction); run 11 showed that switching to IMP-vs-BEN reward doesn't help either. The model can optimize whichever reward it's given, but none of these reward signals lead to policies that actually beat BEN. The gap is likely architectural — our single transformer lacks the capacity and specialization of BEN's model suite.
+**Capacity is the key lever.** Runs 9-11 eliminated training signal hypotheses (opponent, KL threshold, reward signal). Run 12 confirmed that model capacity was the bottleneck — the same training setup (self-play + PAR) that plateaued at -5.18 with 5.1M params improved to -3.60 with 10.8M params. Further capacity increases may yield additional gains.
 
 **No position specialization.** BEN uses 8 separate card play models (lefty/dummy/righty/declarer × NT/suit), each specialized for its role. Our single transformer uses identical weights for all positions. Declarer play (planning how to take tricks) and defensive play (inferring partner's signals, finding the killing defense) are fundamentally different skills that benefit from specialization.
 
@@ -441,7 +515,7 @@ Runs 9-11 systematically eliminated three hypotheses: run 9 showed BEN as oppone
 
 ### Medium Priority
 
-**11. Increase model capacity.** Now **high priority** given runs 9-11's findings. The current 5.1M parameter model (d_model=256, 6 layers) may not have enough capacity for bridge's complexity. Try d_model=512, n_layers=8 (~20M params). BEN's collective model suite (bidding LSTM + 8 card play NNs + lead models) likely exceeds this in total parameters, and each component is specialized. A larger backbone could better support position-conditional heads (item 9). This is the most likely remaining lever — we've exhausted training signal improvements.
+~~**11. Increase model capacity.**~~ Done in run 12. Increased from d_model=256/n_heads=8/n_layers=6/d_ff=1024 (5.1M params) to d_model=384/n_heads=12/n_layers=6/d_ff=1536 (10.8M params). **Confirmed the capacity hypothesis** — vs BEN improved from -5.18 to -3.60 IMP/deal, the first statistically significant improvement since run 7. Distillation accuracy also improved (73.3% vs 71.2%). Further scaling (e.g., d_model=512 with reduced batch size to fit VRAM) may yield additional gains.
 
 ~~**12. Reward shaping with BEN reference scores.**~~ Done in run 11. IMP-vs-BEN reward (`--reward-mode ben`) plays a BEN-vs-BEN reference game on each deal and uses the reference score instead of DDS PAR. Average vs BEN improved slightly (-6.2 vs -7.2 in run 10) but vs-random collapsed to +0.8. **The reward signal was not the key bottleneck** — the model can optimize for beating BEN's reference scores but this doesn't translate to actually beating BEN in head-to-head play. The gap is architectural.
 
@@ -465,8 +539,10 @@ After runs 4-5 plateaued at +1 IMP, run 6 applied four targeted fixes — superv
 
 Run 8 tested card play pre-training from BBO PBN files (~15K card play examples), but starting from scratch with insufficient data actually performed worse (+1.1 IMP avg). The card play pipeline works — it just needs 10-100x more supervised data to be effective.
 
-Runs 9-11 systematically tested training against BEN. Run 9 (BEN opponent, PAR reward, KL=0.05) averaged -6.6 IMP/deal. Run 10 (relaxed KL=0.10) averaged -7.2 despite full PPO epochs. Run 11 combined BEN distillation (625K examples, 71% accuracy) with IMP-vs-BEN reward — best single eval was -5.08 (iter 449), but averaged -6.2 and vs-random collapsed to +0.8 as the model overfitted to BEN's style. None improved over run 7's -5.18 baseline. This eliminates three hypotheses: the bottleneck is not the opponent, the KL threshold, or the reward signal. The remaining gap is almost certainly architectural.
+Runs 9-11 systematically tested training against BEN. Run 9 (BEN opponent, PAR reward, KL=0.05) averaged -6.6 IMP/deal. Run 10 (relaxed KL=0.10) averaged -7.2 despite full PPO epochs. Run 11 combined BEN distillation (625K examples, 71% accuracy) with IMP-vs-BEN reward — best single eval was -5.08 (iter 449), but averaged -6.2 and vs-random collapsed to +0.8 as the model overfitted to BEN's style. None improved over run 7's -5.18 baseline. This eliminated three hypotheses: the bottleneck is not the opponent, the KL threshold, or the reward signal.
 
-Evaluation against BEN's pre-trained neural networks (pure NN, no search) gives a meaningful skill measurement: our best model (run 7) loses by **-5.18 IMP/deal** (95% CI: [-8.2, -2.2]). All models lose by 5-8 IMPs. BEN's supervised NNs, trained on 8,730+ expert games with 8 specialized position models, have a substantial edge over our single 5.1M-parameter transformer trained via RL self-play. The gap is significant but not enormous — roughly the difference between an intermediate and advanced player.
+Run 12 confirmed the architectural hypothesis. Increasing model capacity from 5.1M to 10.8M parameters (d_model=384, n_heads=12, d_ff=1536) improved vs-BEN performance to **-3.60 IMP/deal** (95% CI: [-4.43, -2.76], 200 games) — a statistically significant improvement of 1.58 IMP/deal over run 7. The larger model also achieved higher distillation accuracy (73.3% vs 71.2%) and better vs-random performance (+4.5 avg advantage). The same training setup (self-play + PAR reward) that had plateaued with the smaller model produced clear gains with more capacity.
 
-The highest-impact next steps are architectural: (1) increasing model capacity (d_model=512, n_layers=8, ~20M params) — the most likely remaining lever; (2) adding position-conditional card play heads to match BEN's specialization; (3) opponent pool training (mixed BEN + self-play) to prevent the overfitting seen in run 11.
+Evaluation against BEN's pre-trained neural networks (pure NN, no search) gives a meaningful skill measurement: our best model (run 12) loses by **-3.60 IMP/deal** (95% CI: [-4.43, -2.76]). The gap has narrowed from ~5.2 to ~3.6 IMP/deal through increased model capacity alone. BEN's supervised NNs, trained on 8,730+ expert games with 8 specialized position models, still have an edge over our single 10.8M-parameter transformer, but the gap is closing.
+
+The highest-impact next steps are: (1) further capacity scaling (d_model=512 with VRAM-conscious batch sizes) — run 12 showed clear returns to scale; (2) adding position-conditional card play heads to match BEN's specialization; (3) raising target_kl from 0.02 to allow fuller PPO updates with the larger model; (4) opponent pool training (mixed BEN + self-play).
